@@ -1,0 +1,37 @@
+[project]
+name = "alien-sso-sdk"
+version = "0.1.0"
+description = "Alien SSO SDK for Python — meta-package, see packages/* for the real ones"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "alien-sso",
+    "alien-sso-agent-id",
+    "alien-sso-solana",
+    "alien-sso-jinja",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/agent-id",
+    "packages/core",
+    "packages/solana",
+    "packages/jinja-ui",
+]
+
+[tool.uv.sources]
+alien-sso = { workspace = true }
+alien-sso-agent-id = { workspace = true }
+alien-sso-solana = { workspace = true }
+alien-sso-jinja = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

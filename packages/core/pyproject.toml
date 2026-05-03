@@ -1,0 +1,29 @@
+[project]
+name = "alien-sso"
+version = "0.1.0"
+description = "Alien SSO OAuth2 PKCE client — deeplink, polling, token exchange, refresh"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Alexander Temerev" }]
+keywords = ["alien", "sso", "oauth2", "oidc", "pkce"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/alien-id/sso-sdk-py"
+Repository = "https://github.com/alien-id/sso-sdk-py"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alien_sso"]

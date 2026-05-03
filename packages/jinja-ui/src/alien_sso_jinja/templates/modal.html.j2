@@ -1,0 +1,17 @@
+<div class="alien-sso-modal" id="{{ modal_id }}" role="dialog" aria-modal="true" aria-labelledby="{{ modal_id }}-title" hidden>
+  <div class="alien-sso-modal__backdrop" data-alien-sso-close="{{ modal_id }}"></div>
+  <div class="alien-sso-modal__panel">
+    <button type="button" class="alien-sso-modal__close" data-alien-sso-close="{{ modal_id }}" aria-label="Close">×</button>
+    <h2 class="alien-sso-modal__title" id="{{ modal_id }}-title">{{ title }}</h2>
+    <p class="alien-sso-modal__instructions">{{ instructions }}</p>
+    <div class="alien-sso-modal__qr" data-alien-sso-qr>
+      <div class="alien-sso-modal__spinner" aria-label="Loading">
+        <svg viewBox="0 0 24 24" width="36" height="36"><circle cx="12" cy="12" r="9" stroke="#0f766e" stroke-width="2" fill="none" stroke-dasharray="40 20"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle></svg>
+      </div>
+    </div>
+    <div class="alien-sso-modal__deeplink" data-alien-sso-deeplink hidden>
+      <a target="_blank" rel="noopener" href="#">Open in Alien app</a>
+    </div>
+    <div class="alien-sso-modal__status" data-alien-sso-status></div>
+  </div>
+</div>

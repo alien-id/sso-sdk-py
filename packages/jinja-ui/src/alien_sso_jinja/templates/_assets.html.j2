@@ -1,0 +1,162 @@
+<style>
+.alien-sso-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 500 14px/1 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  padding: 10px 16px; border-radius: 8px;
+  background: #0f766e; color: #fff; border: 0; cursor: pointer;
+  transition: background .15s ease, transform .15s ease;
+}
+.alien-sso-btn:hover { background: #0e6b63; transform: translateY(-1px); }
+.alien-sso-btn:active { transform: translateY(0); }
+.alien-sso-btn-icon { width: 18px; height: 18px; flex: 0 0 18px; }
+
+.alien-sso-modal { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.alien-sso-modal[hidden] { display: none; }
+.alien-sso-modal__backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, .55); backdrop-filter: blur(2px); }
+.alien-sso-modal__panel {
+  position: relative; background: #fff; border-radius: 14px;
+  padding: 28px 28px 22px; max-width: 360px; width: calc(100% - 32px);
+  box-shadow: 0 20px 60px -20px rgba(15, 23, 42, .35);
+  font: 14px/1.5 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #1f2630;
+}
+.alien-sso-modal__close {
+  position: absolute; top: 6px; right: 10px; width: 32px; height: 32px;
+  background: transparent; border: 0; font-size: 24px; line-height: 1;
+  color: #8a8e96; cursor: pointer; border-radius: 8px;
+}
+.alien-sso-modal__close:hover { background: #f0ece3; color: #1f2630; }
+.alien-sso-modal__title { margin: 0 0 4px; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+.alien-sso-modal__instructions { margin: 0 0 16px; color: #8a8e96; font-size: 13px; }
+.alien-sso-modal__qr {
+  display: flex; align-items: center; justify-content: center;
+  width: 240px; height: 240px; margin: 0 auto;
+  background: #f6f3ec; border-radius: 10px;
+}
+.alien-sso-modal__qr svg { width: 232px; height: 232px; display: block; }
+.alien-sso-modal__deeplink { text-align: center; margin-top: 12px; font-size: 13px; }
+.alien-sso-modal__deeplink a { color: #0f766e; text-decoration: none; font-weight: 500; }
+.alien-sso-modal__deeplink a:hover { text-decoration: underline; }
+.alien-sso-modal__status { min-height: 20px; margin-top: 12px; text-align: center; font-size: 13px; color: #8a8e96; }
+.alien-sso-modal__status.success { color: #047857; }
+.alien-sso-modal__status.error { color: #b91c1c; }
+.alien-sso-modal__spinner { display: flex; align-items: center; justify-content: center; }
+</style>
+<script>
+(function () {
+  if (window.__AlienSso) return;
+  var API = {{ api_base | tojson }};
+  var POLL_MS = {{ polling_interval_ms }};
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function on(el, ev, fn) { el.addEventListener(ev, fn); }
+
+  function open(modal) {
+    modal.hidden = false;
+    start(modal);
+  }
+  function close(modal) {
+    modal.hidden = true;
+    var t = modal.__alienTimer;
+    if (t) clearTimeout(t);
+    modal.__alienTimer = null;
+    modal.__alienPolling = false;
+    var status = $('[data-alien-sso-status]', modal);
+    if (status) { status.textContent = ''; status.className = 'alien-sso-modal__status'; }
+    var qr = $('[data-alien-sso-qr]', modal);
+    if (qr) qr.innerHTML = '<div class="alien-sso-modal__spinner"><svg viewBox="0 0 24 24" width="36" height="36"><circle cx="12" cy="12" r="9" stroke="#0f766e" stroke-width="2" fill="none" stroke-dasharray="40 20"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle></svg></div>';
+    var dl = $('[data-alien-sso-deeplink]', modal);
+    if (dl) dl.hidden = true;
+  }
+
+  function setStatus(modal, text, kind) {
+    var status = $('[data-alien-sso-status]', modal);
+    if (!status) return;
+    status.textContent = text;
+    status.className = 'alien-sso-modal__status' + (kind ? ' ' + kind : '');
+  }
+
+  function start(modal) {
+    fetch(API + '/start', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'Failed to start');
+        var qr = $('[data-alien-sso-qr]', modal);
+        if (qr && d.qr_svg) qr.innerHTML = d.qr_svg;
+        var dlWrap = $('[data-alien-sso-deeplink]', modal);
+        var dlA = dlWrap && dlWrap.querySelector('a');
+        if (dlA && d.deep_link) { dlA.href = d.deep_link; dlWrap.hidden = false; }
+        modal.__alienPolling = true;
+        scheduleNextPoll(modal, d.polling_code);
+      })
+      .catch(function (err) { setStatus(modal, err.message, 'error'); });
+  }
+
+  function scheduleNextPoll(modal, polling_code) {
+    if (!modal.__alienPolling) return;
+    modal.__alienTimer = setTimeout(function () { poll(modal, polling_code); }, POLL_MS);
+  }
+
+  function poll(modal, polling_code) {
+    if (!modal.__alienPolling) return;
+    fetch(API + '/poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ polling_code: polling_code }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'Failed to poll');
+        if (d.status === 'authorized') {
+          finish(modal, d.authorization_code);
+        } else if (d.status === 'rejected') {
+          modal.__alienPolling = false;
+          setStatus(modal, 'Sign-in rejected.', 'error');
+        } else if (d.status === 'expired') {
+          modal.__alienPolling = false;
+          setStatus(modal, 'QR code expired. Reopen to try again.', 'error');
+        } else {
+          scheduleNextPoll(modal, polling_code);
+        }
+      })
+      .catch(function (err) { setStatus(modal, err.message, 'error'); });
+  }
+
+  function finish(modal, authorization_code) {
+    modal.__alienPolling = false;
+    fetch(API + '/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authorization_code: authorization_code }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'Failed to finish');
+        setStatus(modal, 'Signed in. ✓', 'success');
+        modal.dispatchEvent(new CustomEvent('alien-sso:success', { detail: d, bubbles: true }));
+      })
+      .catch(function (err) { setStatus(modal, err.message, 'error'); });
+  }
+
+  document.addEventListener('click', function (e) {
+    var openTarget = e.target.closest('[data-alien-sso-open]');
+    if (openTarget) {
+      var id = openTarget.getAttribute('data-alien-sso-open');
+      var modal = document.getElementById(id);
+      if (modal) open(modal);
+    }
+    var closeTarget = e.target.closest('[data-alien-sso-close]');
+    if (closeTarget) {
+      var id2 = closeTarget.getAttribute('data-alien-sso-close');
+      var modal2 = document.getElementById(id2);
+      if (modal2) close(modal2);
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    document.querySelectorAll('.alien-sso-modal:not([hidden])').forEach(close);
+  });
+
+  window.__AlienSso = { open: open, close: close };
+})();
+</script>

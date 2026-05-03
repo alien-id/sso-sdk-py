@@ -1,0 +1,31 @@
+[project]
+name = "alien-sso-jinja"
+version = "0.1.0"
+description = "Server-rendered sign-in button + QR modal for Alien SSO (replacement for @alien-id/sso-react)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "alien-sso",
+    "jinja2>=3.1",
+    "segno>=1.6",
+]
+
+[project.optional-dependencies]
+flask = ["flask>=3.0"]
+fastapi = ["fastapi>=0.100"]
+solana = ["alien-sso-solana"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alien_sso_jinja"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/alien_sso_jinja/templates" = "alien_sso_jinja/templates"
+
+[tool.uv.sources]
+alien-sso = { workspace = true }
+alien-sso-solana = { workspace = true }
