@@ -19,7 +19,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from solders.instruction import AccountMeta, Instruction
@@ -61,6 +61,22 @@ _CREATE_ATTESTATION_DISCRIMINATOR = bytes([49, 24, 67, 80, 12, 249, 96, 239])
 #   96..    (event_authority, authority, session_registry — unused here)
 _DISCRIMINATOR_LEN = 8
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _require_secure_base_url(url: str) -> None:
+    """RFC 6749 §10.4: tokens MUST be transmitted over TLS. Reject `http://`
+    for any non-loopback host at construction time."""
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and (parsed.hostname or "") in _LOOPBACK_HOSTS:
+        return
+    raise ValueError(
+        f"sso_base_url must use https (got {url!r}); "
+        "RFC 6749 §10.4 requires TLS for credential transport"
+    )
+
 
 @dataclass(frozen=True)
 class AlienSolanaSsoClientConfig:
@@ -83,6 +99,7 @@ class AlienSolanaSsoClient:
     ) -> None:
         if not config.sso_base_url:
             raise ValueError("sso_base_url is required")
+        _require_secure_base_url(config.sso_base_url)
         if not config.provider_address:
             raise ValueError("provider_address is required")
         self.config = config
