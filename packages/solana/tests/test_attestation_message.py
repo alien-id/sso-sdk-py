@@ -35,7 +35,7 @@ def _fake_program_state() -> bytes:
 
 def test_builds_message_with_two_instructions():
     cfg = AlienSolanaSsoClientConfig(
-        sso_base_url="http://sso.test",
+        sso_base_url="http://localhost",
         provider_address="00000001000000000000000000000000",
     )
     client = AlienSolanaSsoClient(cfg)
@@ -80,7 +80,7 @@ def test_rejects_program_state_too_small():
     from alien_sso_solana import AlienSolanaSsoError
 
     cfg = AlienSolanaSsoClientConfig(
-        sso_base_url="http://sso.test", provider_address="prov"
+        sso_base_url="http://localhost", provider_address="prov"
     )
     client = AlienSolanaSsoClient(cfg)
     with pytest.raises(AlienSolanaSsoError):

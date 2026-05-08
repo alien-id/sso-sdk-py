@@ -20,7 +20,7 @@ from alien_sso_jinja import SsoUi, render_qr_svg
 @pytest.fixture
 async def client():
     cfg = AlienSsoClientConfig(
-        sso_base_url="http://sso.test", provider_address="prov-1"
+        sso_base_url="http://localhost", provider_address="prov-1"
     )
     c = AlienSsoClient(cfg, storage=MemoryStorage())
     yield c
@@ -77,7 +77,7 @@ def test_render_qr_svg_returns_svg_string():
 # ─── Handlers ─────────────────────────────────────────────────────────────
 
 
-SSO = "http://sso.test"
+SSO = "http://localhost"
 
 
 async def test_start_returns_qr_and_polling_code(ui):
