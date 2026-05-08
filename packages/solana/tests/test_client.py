@@ -18,7 +18,7 @@ from alien_sso_solana._ed25519_program import (
     create_ed25519_verify_instruction,
 )
 
-SSO_BASE_URL = "http://sso.test"
+SSO_BASE_URL = "http://localhost"
 PROVIDER = "00000001000000000000000000000000"
 
 
