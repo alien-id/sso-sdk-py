@@ -316,9 +316,12 @@ def test_accepts_id_token_when_expected_audience_is_a_list():
     assert result.ok is True
 
 
-def test_verify_owner_options_requires_expected_audience_and_issuer():
-    # RFC 7519 §4.1.1 / §4.1.3: enforce iss + aud always — no permissive
-    # default that callers can accidentally rely on.
+def test_verify_owner_options_requires_expected_audience_only():
+    # RFC 7519 §4.1.3 / OIDC §3.1.3.7: `expected_audience` MUST be
+    # caller-supplied — it is the Client's own ``client_id`` and the
+    # library cannot guess it. `expected_issuer` is optional; the agent-id
+    # package is single-tenant against Alien SSO and falls back to
+    # ``DEFAULT_SSO_BASE_URL`` when the caller omits it.
     import pytest
 
     with pytest.raises(TypeError):
@@ -327,10 +330,9 @@ def test_verify_owner_options_requires_expected_audience_and_issuer():
         VerifyOwnerOptions(  # type: ignore[call-arg]
             jwks={"keys": []}, expected_issuer="x"
         )
-    with pytest.raises(TypeError):
-        VerifyOwnerOptions(  # type: ignore[call-arg]
-            jwks={"keys": []}, expected_audience="y"
-        )
+    # Audience-only is valid: issuer defaults to DEFAULT_SSO_BASE_URL.
+    opts = VerifyOwnerOptions(jwks={"keys": []}, expected_audience="y")
+    assert opts.expected_issuer is None
 
 
 def test_rejects_id_token_with_wrong_issuer():
@@ -342,6 +344,33 @@ def test_rejects_id_token_with_wrong_issuer():
     result = verify_agent_token_with_owner(
         b.token_b64,
         VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"),
+    )
+    assert result.ok is False
+    assert result.error == "id_token iss does not match expected issuer"
+
+
+def test_default_expected_issuer_is_alien_sso():
+    # The library is single-tenant against Alien SSO; when the caller
+    # omits `expected_issuer`, the verifier pins to the production
+    # endpoint. A token whose iss matches the default verifies cleanly.
+    b = build_full_chain_token()  # default iss = https://sso.alien-api.com
+    result = verify_agent_token_with_owner(
+        b.token_b64,
+        VerifyOwnerOptions(jwks=b.jwks, expected_audience="test-provider"),
+    )
+    assert result.ok is True
+
+
+def test_default_expected_issuer_rejects_non_default_iss():
+    # Mirror of `test_rejects_id_token_with_wrong_issuer`, but exercising
+    # the default path: an id_token from a non-default AS must fail when
+    # the caller did not opt in via `expected_issuer`.
+    b = build_full_chain_token(
+        id_token_payload_overrides={"iss": "https://staging.alien-api.com"},
+    )
+    result = verify_agent_token_with_owner(
+        b.token_b64,
+        VerifyOwnerOptions(jwks=b.jwks, expected_audience="test-provider"),
     )
     assert result.ok is False
     assert result.error == "id_token iss does not match expected issuer"

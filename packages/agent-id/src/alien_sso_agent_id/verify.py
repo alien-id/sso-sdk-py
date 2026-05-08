@@ -21,7 +21,7 @@ from alien_sso_agent_id._crypto import (
     verify_ed25519_hex,
     verify_rs256,
 )
-from alien_sso_agent_id.jwks import EncryptedIdTokenError, parse_jwt
+from alien_sso_agent_id.jwks import DEFAULT_SSO_BASE_URL, EncryptedIdTokenError, parse_jwt
 from alien_sso_agent_id.types import (
     VerifyFailure,
     VerifyOwnerOptions,
@@ -281,8 +281,12 @@ def verify_agent_token_with_owner(
     if jwt.payload.get("sub") != basic.owner:
         return _fail("id_token sub does not match token owner")
 
-    # RFC 7519 §4.1.1 / RFC 9068 §5: iss MUST exactly match.
-    if jwt.payload.get("iss") != opts.expected_issuer:
+    # RFC 7519 §4.1.1 / RFC 9068 §5: iss MUST exactly match. When the
+    # caller omits `expected_issuer` the library pins to the Alien SSO
+    # production endpoint, since the agent-id package is single-tenant
+    # against that AS.
+    expected_issuer = opts.expected_issuer or DEFAULT_SSO_BASE_URL
+    if jwt.payload.get("iss") != expected_issuer:
         return _fail("id_token iss does not match expected issuer")
 
     # RFC 7519 §4.1.3: aud may be a string or array; the principal MUST
