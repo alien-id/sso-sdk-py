@@ -14,13 +14,14 @@ from typing import Any, Mapping, Union
 from alien_sso_agent_id._b64 import b64url_decode
 from alien_sso_agent_id._canonical import canonical_json_string
 from alien_sso_agent_id._crypto import (
+    ed25519_jwk_thumbprint,
     fingerprint_public_key_pem,
     sha256_hex,
     verify_ed25519_b64url,
     verify_ed25519_hex,
     verify_rs256,
 )
-from alien_sso_agent_id.jwks import parse_jwt
+from alien_sso_agent_id.jwks import EncryptedIdTokenError, parse_jwt
 from alien_sso_agent_id.types import (
     VerifyFailure,
     VerifyOwnerOptions,
@@ -202,11 +203,35 @@ def verify_agent_token_with_owner(
 
     try:
         jwt = parse_jwt(id_token)
-    except Exception:
+    except EncryptedIdTokenError:
+        # OIDC §3.1.3.7 / RFC 7516: encrypted ID tokens are not supported;
+        # surface the policy explicitly rather than as a parse failure.
+        return _fail("Encrypted ID Tokens (JWE) are not supported")
+    except (ValueError, TypeError):
+        # parse_jwt raises ValueError on shape errors (split count, non-JSON,
+        # non-object header/payload) and TypeError on input-type confusion.
+        # binascii.Error is a ValueError subclass, covered here too.
         return _fail("Invalid id_token encoding")
 
     if jwt.header.get("alg") != "RS256":
         return _fail(f"Unsupported id_token alg: {jwt.header.get('alg')}")
+
+    # RFC 8725 §3.7 / RFC 7515 §4.1.9: when typ is present it MUST identify
+    # this as an id_token. Reject any cross-class typ (e.g. at+jwt) so a
+    # smuggled access token cannot be accepted as an id_token.
+    typ = jwt.header.get("typ")
+    if typ is not None:
+        if not isinstance(typ, str):
+            return _fail("id_token typ must be a string")
+        typ_lc = typ.lower()
+        if typ_lc not in ("jwt", "application/jwt"):
+            return _fail(f"id_token typ {typ!r} is not jwt/application/jwt")
+
+    # RFC 7515 §4.1.11: any unrecognised critical header MUST cause
+    # rejection. We support no JWS extensions; reject any non-empty crit.
+    crit = jwt.header.get("crit")
+    if crit is not None and (not isinstance(crit, list) or len(crit) > 0):
+        return _fail("id_token contains unsupported crit header")
 
     kid = jwt.header.get("kid")
     matching: dict[str, Any] | None = None
@@ -216,6 +241,11 @@ def verify_agent_token_with_owner(
             break
     if matching is None:
         return _fail(f"No matching JWKS key for kid: {kid}")
+    # RFC 7515 §10.7: when the JWK pins an `alg`, it MUST match the JWS
+    # alg. Permissive when the JWK omits alg (RFC 7517 §4.4: optional).
+    jwk_alg = matching.get("alg")
+    if jwk_alg is not None and jwk_alg != "RS256":
+        return _fail(f"Invalid JWKS key: alg {jwk_alg} does not match RS256")
     if not matching.get("n") or not matching.get("e"):
         return _fail("Invalid JWKS key: missing required RSA fields (n, e)")
 
@@ -226,8 +256,78 @@ def verify_agent_token_with_owner(
     if not rsa_ok:
         return _fail("id_token signature verification failed")
 
+    # RFC 7519 §4.1.4 / §7.2: exp MUST be in the future. OIDC Core §2
+    # makes it REQUIRED on id_token — a missing exp is a hard fail.
+    now_sec = int(time.time())
+    skew_sec = opts.clock_skew_ms // 1000
+    exp = jwt.payload.get("exp")
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        return _fail("id_token missing exp")
+    if now_sec >= int(exp) + skew_sec:
+        return _fail("id_token expired")
+    # RFC 7519 §4.1.5: when nbf is present, current time MUST be ≥ nbf.
+    nbf = jwt.payload.get("nbf")
+    if isinstance(nbf, (int, float)) and not isinstance(nbf, bool):
+        if now_sec < int(nbf) - skew_sec:
+            return _fail("id_token not yet valid")
+
+    # RFC 7519 §4.1.6: "iat" value MUST be a number containing a NumericDate
+    # value. Optional, but when present must be a numeric type (excluding bool).
+    if "iat" in jwt.payload:
+        iat = jwt.payload.get("iat")
+        if not isinstance(iat, (int, float)) or isinstance(iat, bool):
+            return _fail("id_token iat must be a NumericDate")
+
     if jwt.payload.get("sub") != basic.owner:
         return _fail("id_token sub does not match token owner")
+
+    # RFC 7519 §4.1.1 / RFC 9068 §5: iss MUST exactly match.
+    if jwt.payload.get("iss") != opts.expected_issuer:
+        return _fail("id_token iss does not match expected issuer")
+
+    # RFC 7519 §4.1.3: aud may be a string or array; the principal MUST
+    # be identified by at least one value when it is present.
+    aud_claim = jwt.payload.get("aud")
+    token_auds = aud_claim if isinstance(aud_claim, list) else [aud_claim]
+    expected = (
+        opts.expected_audience
+        if isinstance(opts.expected_audience, list)
+        else [opts.expected_audience]
+    )
+    if not any(a in token_auds for a in expected):
+        return _fail("id_token aud does not match expected audience")
+    # OIDC §3.1.3.7 step 3: "MUST be rejected ... if it contains additional
+    # audiences not trusted by the Client." Default trust = expected set.
+    trusted = opts.trusted_audiences if opts.trusted_audiences is not None else set(expected)
+    for a in token_auds:
+        if a not in trusted:
+            return _fail("id_token contains untrusted audience")
+
+    # OIDC Core §3.1.3.7.6 / .7: if `azp` is present, it MUST match the
+    # client_id (i.e., expected_audience). Multi-aud without `azp` is a
+    # SHOULD-level recommendation we do not enforce (the AS issued the
+    # token; we still trust the iss/aud match above).
+    azp = jwt.payload.get("azp")
+    if azp is not None:
+        if not isinstance(azp, str) or not any(a == azp for a in expected):
+            return _fail("id_token azp does not match expected audience")
+
+    # cnf.jkt MUST equal RFC 7638 thumbprint of the agent's public key
+    # (RFC 7800 §3.1 / RFC 9449 §6.1). Without this check the id_token
+    # is not bound to the presenting agent — an attacker can substitute
+    # their own keypair across the binding payload + proof bundle while
+    # reusing a stolen id_token verbatim. Anchors at the agent key, not
+    # the binding's self-embedded key.
+    try:
+        expected_jkt = ed25519_jwk_thumbprint(basic.public_key_pem)
+    except (ValueError, TypeError) as err:
+        return _fail(f"cnf.jkt anchor: {err}")
+    cnf = jwt.payload.get("cnf")
+    actual_jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
+    if not isinstance(actual_jkt, str) or not actual_jkt:
+        return _fail("id_token missing cnf.jkt")
+    if actual_jkt != expected_jkt:
+        return _fail("id_token cnf.jkt does not bind to agent key")
 
     owner_proof_verified = False
     proof = payload.get("ownerSessionProof")

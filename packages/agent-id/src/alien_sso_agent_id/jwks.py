@@ -14,6 +14,14 @@ DEFAULT_SSO_BASE_URL = "https://sso.alien-api.com"
 _HTTP_TIMEOUT = 5.0
 
 
+class EncryptedIdTokenError(ValueError):
+    """Raised when an id_token is a JWE (RFC 7516) instead of a JWS.
+
+    OIDC §3.1.3.7 requires the client to either decrypt or reject. We do
+    not implement decryption, so this surfaces the policy explicitly.
+    """
+
+
 @dataclass(frozen=True)
 class _ParsedJwt:
     header_b64url: str
@@ -25,11 +33,28 @@ class _ParsedJwt:
 
 def parse_jwt(token: str) -> _ParsedJwt:
     parts = token.split(".")
+    # RFC 7516 §9: JWEs have five segments separated by four periods. The
+    # caller passed an Encrypted ID Token; we don't support decryption.
+    if len(parts) == 5:
+        raise EncryptedIdTokenError(
+            "Encrypted ID Tokens (JWE) are not supported"
+        )
     if len(parts) != 3:
         raise ValueError("Invalid JWT: expected 3 parts")
     header_b64, payload_b64, sig_b64 = parts
     header = json.loads(b64url_decode(header_b64))
     payload = json.loads(b64url_decode(payload_b64))
+    # RFC 7519 §7.2 steps 2 & 7: JOSE Header and JWT Claims Set MUST be
+    # JSON objects. Reject literals (null, strings, arrays).
+    if not isinstance(header, dict) or not isinstance(payload, dict):
+        raise ValueError("Invalid JWT: header and payload must be JSON objects")
+    # RFC 7516 §4.1.2: `enc` is mandatory in JWE protected headers. A
+    # 3-part token carrying `enc` is mis-routed encryption — reject with
+    # the same explicit policy as a 5-part JWE.
+    if "enc" in header:
+        raise EncryptedIdTokenError(
+            "Encrypted ID Tokens (JWE) are not supported"
+        )
     return _ParsedJwt(header_b64, payload_b64, sig_b64, header, payload)
 
 

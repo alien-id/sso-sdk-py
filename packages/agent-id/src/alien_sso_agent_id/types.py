@@ -38,11 +38,25 @@ class VerifyOptions:
 
 @dataclass(frozen=True)
 class VerifyOwnerOptions:
-    """Options for `verify_agent_token_with_owner`. Adds a required JWKS."""
+    """Options for `verify_agent_token_with_owner`.
+
+    BREAKING (vs. earlier optional defaults): `expected_issuer` and
+    `expected_audience` are REQUIRED. Per RFC 7519 §4.1.1 / §4.1.3 a
+    consumer MUST validate iss and identify itself in aud — leaving these
+    optional allowed callers to silently accept any issued id_token.
+    `expected_audience` may be a single string or a list.
+
+    `trusted_audiences` is the OIDC §3.1.3.7 step 3 trust set: when the
+    id_token's aud is multi-valued, every entry MUST be in this set.
+    Defaults to the expected_audience(s) when omitted.
+    """
 
     jwks: JWKS
+    expected_issuer: str
+    expected_audience: Union[str, list[str]]
     max_age_ms: int = 5 * 60 * 1000
     clock_skew_ms: int = 30 * 1000
+    trusted_audiences: Optional[frozenset[str]] = None
 
 
 @dataclass(frozen=True)
