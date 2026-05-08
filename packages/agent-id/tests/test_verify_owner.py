@@ -8,6 +8,7 @@ import time
 from conftest import (
     b64url,
     build_full_chain_token,
+    ed25519_thumbprint,
     fingerprint_pem,
     generate_ed25519,
     generate_rsa,
@@ -409,6 +410,38 @@ def test_rejects_id_token_with_missing_exp():
     result = verify_agent_token_with_owner(b2.token_b64, VerifyOwnerOptions(jwks=b2.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
     assert result.ok is False
     assert result.error == "id_token missing exp"
+
+
+# ─── cnf.jkt PoP binding (RFC 7800 §3.1, RFC 9449 §6.1) ──────────────────
+
+
+def test_rejects_id_token_missing_cnf_jkt():
+    # Without `cnf.jkt` the id_token is not bound to the presenting
+    # agent — an attacker who steals an id_token could replay it across
+    # a fabricated binding and proof bundle.
+    b = build_full_chain_token(omit_cnf=True)
+    result = verify_agent_token_with_owner(
+        b.token_b64,
+        VerifyOwnerOptions(jwks=b.jwks, expected_audience="test-provider"),
+    )
+    assert result.ok is False
+    assert result.error == "id_token missing cnf.jkt"
+
+
+def test_rejects_id_token_whose_cnf_jkt_does_not_bind_to_agent_key():
+    # RFC 7800 §3.1: cnf.jkt MUST be the RFC 7638 thumbprint of the
+    # presenter's key. A non-matching thumbprint is a binding violation
+    # even if every other claim verifies.
+    other_keys = generate_ed25519()
+    b = build_full_chain_token(
+        id_token_payload_overrides={"cnf": {"jkt": ed25519_thumbprint(other_keys.public_key_pem)}},
+    )
+    result = verify_agent_token_with_owner(
+        b.token_b64,
+        VerifyOwnerOptions(jwks=b.jwks, expected_audience="test-provider"),
+    )
+    assert result.ok is False
+    assert result.error == "id_token cnf.jkt does not bind to agent key"
 
 
 # ─── encrypted ID Token policy (OIDC §3.1.3.7 / RFC 7516) ────────────────
