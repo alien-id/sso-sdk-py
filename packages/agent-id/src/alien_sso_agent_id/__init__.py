@@ -9,7 +9,7 @@ to prove the human owner actually authorized this agent.
 Python port of `@alien-id/sso-agent-id`.
 """
 
-from alien_sso_agent_id.jwks import fetch_alien_jwks
+from alien_sso_agent_id.jwks import DEFAULT_SSO_BASE_URL, fetch_alien_jwks
 from alien_sso_agent_id.types import (
     AgentIdentity,
     OwnerBinding,
@@ -31,6 +31,7 @@ from alien_sso_agent_id.verify import (
 
 __all__ = [
     "AgentIdentity",
+    "DEFAULT_SSO_BASE_URL",
     "JWK",
     "JWKS",
     "OwnerBinding",

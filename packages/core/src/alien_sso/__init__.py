@@ -5,7 +5,7 @@ assumptions in the JS package are replaced with a pluggable `Storage` protocol
 — see `alien_sso.storage` for the in-memory default and a disk-backed variant.
 """
 
-from alien_sso.client import AlienSsoClient, AlienSsoClientConfig, NonceStore
+from alien_sso.client import AlienSsoClient, AlienSsoClientConfig
 from alien_sso.errors import (
     AlienSsoError,
     AuthorizeError,
@@ -32,7 +32,6 @@ __all__ = [
     "AuthorizeResponse",
     "FileStorage",
     "MemoryStorage",
-    "NonceStore",
     "PollError",
     "PollResponse",
     "PollStatus",

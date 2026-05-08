@@ -96,11 +96,7 @@ class SsoUi:
     # ─── HTTP handlers (framework-agnostic, async) ──────────────────────
 
     async def start(self) -> HandlerResult:
-        """Begin a flow. Returns deep_link, polling_code, qr_svg, state.
-
-        `state` is RFC 6749 §10.12 CSRF protection — the caller MUST
-        thread it back into `poll()` so the AS round-trip is verified.
-        """
+        """Begin a flow. Returns deep_link, polling_code, qr_svg."""
         try:
             resp = await self.client.generate_deeplink()
         except Exception as e:
@@ -112,27 +108,16 @@ class SsoUi:
                 "deep_link": resp.deep_link,
                 "polling_code": resp.polling_code,
                 "expired_at": resp.expired_at,
-                "state": resp.state,
                 "qr_svg": render_qr_svg(resp.deep_link),
             },
         )
 
-    async def poll(
-        self, polling_code: str, *, expected_state: Optional[str] = None
-    ) -> HandlerResult:
-        """Poll for authorization. Returns the upstream PollResponse fields.
-
-        `expected_state` SHOULD be the value returned from `start()` so
-        RFC 6749 §10.12 CSRF protection runs end-to-end. Callers that
-        omit it intentionally accept the loss of state-based correlation
-        (only the polling_code binds the response to the request).
-        """
+    async def poll(self, polling_code: str) -> HandlerResult:
+        """Poll for authorization. Returns the upstream PollResponse fields."""
         if not polling_code:
             return HandlerResult(400, {"ok": False, "error": "polling_code required"})
         try:
-            resp = await self.client.poll_auth(
-                polling_code, expected_state=expected_state
-            )
+            resp = await self.client.poll_auth(polling_code)
         except Exception as e:
             return HandlerResult(502, {"ok": False, "error": str(e)})
         body: dict[str, Any] = {"ok": True, "status": resp.status.value}
