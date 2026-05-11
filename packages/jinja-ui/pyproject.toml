@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "alien-sso",
+    "alien-sso>=0.1.0,<1",
     "jinja2>=3.1",
     "segno>=1.6",
 ]
@@ -14,7 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 flask = ["flask>=3.0"]
 fastapi = ["fastapi>=0.100"]
-solana = ["alien-sso-solana"]
+solana = ["alien-sso-solana>=0.1.0,<1"]
 
 [build-system]
 requires = ["hatchling"]

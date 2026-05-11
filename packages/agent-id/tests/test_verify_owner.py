@@ -12,10 +12,7 @@ from conftest import (
     fingerprint_pem,
     generate_ed25519,
     generate_rsa,
-    now_ms,
-    random_hex,
     sign_ed25519_b64url,
-    sign_ed25519_hex,
 )
 
 from alien_sso_agent_id import (
@@ -28,36 +25,14 @@ from alien_sso_agent_id import (
 # ─── happy path ───────────────────────────────────────────────────────────
 
 
-def test_verifies_full_chain_without_proof():
+def test_verifies_full_chain():
     b = build_full_chain_token()
     result = verify_agent_token_with_owner(b.token_b64, VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
     assert result.ok is True
     assert result.fingerprint == b.fp
     assert result.owner == b.owner
     assert result.owner_verified is True
-    assert result.owner_proof_verified is False
     assert result.issuer == "https://sso.alien-api.com"
-
-
-def test_verifies_full_chain_with_owner_session_proof():
-    agent_keys = generate_ed25519()
-    proof_keys = generate_ed25519()
-    owner = "00000003010000000000539c741e0df8"
-    seed = random_hex(16)
-    sess_sig = sign_ed25519_hex(f"{owner}{seed}", proof_keys.private_key_pem)
-    proof = {
-        "sessionAddress": owner,
-        "sessionSignature": sess_sig,
-        "sessionSignatureSeed": seed,
-        "sessionPublicKey": proof_keys.public_key_hex,
-        "providerAddress": "test-provider",
-        "signatureVerifiedAt": int(time.time()),
-    }
-    b = build_full_chain_token(agent_keys=agent_keys, owner=owner, owner_session_proof=proof)
-    result = verify_agent_token_with_owner(b.token_b64, VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
-    assert result.ok is True
-    assert result.owner_verified is True
-    assert result.owner_proof_verified is True
 
 
 # ─── missing fields ───────────────────────────────────────────────────────
@@ -527,55 +502,6 @@ def test_rejects_jws_with_enc_header():
     )
     assert result.ok is False
     assert "Encrypted ID Token" in result.error
-
-
-# ─── owner session proof ──────────────────────────────────────────────────
-
-
-def test_rejects_proof_with_wrong_session_address():
-    proof_keys = generate_ed25519()
-    wrong_owner = "wrong-address"
-    seed = random_hex(16)
-    session_sig = sign_ed25519_hex(f"{wrong_owner}{seed}", proof_keys.private_key_pem)
-    b = build_full_chain_token(
-        owner_session_proof={
-            "sessionAddress": wrong_owner,
-            "sessionSignature": session_sig,
-            "sessionSignatureSeed": seed,
-            "sessionPublicKey": proof_keys.public_key_hex,
-        }
-    )
-    result = verify_agent_token_with_owner(b.token_b64, VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
-    assert result.error == "Owner session proof address mismatch"
-
-
-def test_rejects_proof_with_invalid_signature():
-    proof_keys = generate_ed25519()
-    other = generate_ed25519()
-    owner = "00000003010000000000539c741e0df8"
-    seed = random_hex(16)
-    session_sig = sign_ed25519_hex(f"{owner}{seed}", other.private_key_pem)
-    b = build_full_chain_token(
-        owner=owner,
-        owner_session_proof={
-            "sessionAddress": owner,
-            "sessionSignature": session_sig,
-            "sessionSignatureSeed": seed,
-            "sessionPublicKey": proof_keys.public_key_hex,  # doesn't match signer
-        },
-    )
-    result = verify_agent_token_with_owner(b.token_b64, VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
-    assert result.error == "Owner session proof signature failed"
-
-
-def test_rejects_proof_with_incomplete_fields():
-    b = build_full_chain_token(
-        owner_session_proof={
-            "sessionAddress": "00000003010000000000539c741e0df8",
-        }
-    )
-    result = verify_agent_token_with_owner(b.token_b64, VerifyOwnerOptions(jwks=b.jwks, expected_issuer="https://sso.alien-api.com", expected_audience="test-provider"))
-    assert result.error == "Incomplete owner session proof fields"
 
 
 # ─── verify_agent_request_with_owner ──────────────────────────────────────

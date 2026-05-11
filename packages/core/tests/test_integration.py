@@ -25,7 +25,7 @@ from alien_sso import (
 )
 
 SSO_BASE_URL = "https://sso.test"
-ISSUER = "https://sso.alien.com"
+ISSUER = "https://sso.alien-api.com"
 PROVIDER_ADDRESS = "00000001000000000000000000000000"
 
 

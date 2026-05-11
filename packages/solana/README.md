@@ -27,7 +27,7 @@ from solana.rpc.api import Client as RpcClient   # solana-py, optional
 
 async def main():
     cfg = AlienSolanaSsoClientConfig(
-        sso_base_url="https://sso.alien.com",
+        sso_base_url="https://sso.alien-api.com",
         provider_address="<your-provider>",
     )
     payer = Keypair()

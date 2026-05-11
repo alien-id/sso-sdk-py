@@ -18,7 +18,6 @@ from alien_sso_agent_id._crypto import (
     fingerprint_public_key_pem,
     sha256_hex,
     verify_ed25519_b64url,
-    verify_ed25519_hex,
     verify_rs256,
 )
 from alien_sso_agent_id.jwks import DEFAULT_SSO_BASE_URL, EncryptedIdTokenError, parse_jwt
@@ -143,7 +142,6 @@ def verify_agent_token_with_owner(
       6. id_token hash matches binding.
       7. id_token RS256 signature verifies against the JWKS.
       8. id_token sub matches the token owner.
-      9. (optional) ownerSessionProof signature verifies.
     """
     basic = verify_agent_token(
         token_b64,
@@ -333,34 +331,6 @@ def verify_agent_token_with_owner(
     if actual_jkt != expected_jkt:
         return _fail("id_token cnf.jkt does not bind to agent key")
 
-    owner_proof_verified = False
-    proof = payload.get("ownerSessionProof")
-    if isinstance(proof, dict):
-        session_address = proof.get("sessionAddress")
-        session_signature = proof.get("sessionSignature")
-        session_seed = proof.get("sessionSignatureSeed")
-        session_pubkey = proof.get("sessionPublicKey")
-
-        if (
-            not isinstance(session_address, str)
-            or not isinstance(session_signature, str)
-            or not isinstance(session_seed, str)
-            or not isinstance(session_pubkey, str)
-        ):
-            return _fail("Incomplete owner session proof fields")
-
-        if session_address != basic.owner:
-            return _fail("Owner session proof address mismatch")
-
-        message = f"{session_address}{session_seed}"
-        try:
-            proof_ok = verify_ed25519_hex(message, session_signature, session_pubkey)
-        except Exception:
-            return _fail("Owner session proof signature error")
-        if not proof_ok:
-            return _fail("Owner session proof signature failed")
-        owner_proof_verified = True
-
     issuer = jwt.payload.get("iss")
     return VerifyOwnerSuccess(
         fingerprint=basic.fingerprint,
@@ -369,7 +339,6 @@ def verify_agent_token_with_owner(
         timestamp=basic.timestamp,
         nonce=basic.nonce,
         issuer=issuer if isinstance(issuer, str) else "",
-        owner_proof_verified=owner_proof_verified,
     )
 
 

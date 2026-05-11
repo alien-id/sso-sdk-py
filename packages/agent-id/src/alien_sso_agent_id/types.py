@@ -85,7 +85,6 @@ class VerifyOwnerSuccess:
     timestamp: int
     nonce: str
     issuer: str
-    owner_proof_verified: bool
     owner_verified: bool = True
     ok: bool = True
 

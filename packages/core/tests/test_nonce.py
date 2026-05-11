@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from alien_sso import AlienSsoClient, AlienSsoClientConfig, MemoryStorage
 
 SSO_BASE_URL = "https://sso.test"
-ISSUER = "https://sso.alien.com"
+ISSUER = "https://sso.alien-api.com"
 PROVIDER = "00000001000000000000000000000000"
 
 

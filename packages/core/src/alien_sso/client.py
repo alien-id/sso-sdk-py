@@ -43,7 +43,7 @@ from alien_sso.schema import (
 )
 from alien_sso.storage import MemoryStorage, Storage
 
-DEFAULT_SSO_BASE_URL = "https://sso.alien.com"
+DEFAULT_SSO_BASE_URL = "https://sso.alien-api.com"
 DEFAULT_POLLING_INTERVAL = 5.0  # seconds, used by callers driving the poll loop
 
 _STORAGE_KEY = "alien-sso_"
