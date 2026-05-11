@@ -20,7 +20,7 @@ from alien_sso_jinja import SsoUi, render_qr_svg
 @pytest.fixture
 async def client():
     cfg = AlienSsoClientConfig(
-        sso_base_url="http://sso.test", provider_address="prov-1"
+        sso_base_url="http://localhost", provider_address="prov-1"
     )
     c = AlienSsoClient(cfg, storage=MemoryStorage())
     yield c
@@ -77,7 +77,7 @@ def test_render_qr_svg_returns_svg_string():
 # ─── Handlers ─────────────────────────────────────────────────────────────
 
 
-SSO = "http://sso.test"
+SSO = "http://localhost"
 
 
 async def test_start_returns_qr_and_polling_code(ui):
@@ -131,22 +131,62 @@ async def test_poll_returns_400_on_empty_code(ui):
 
 async def test_finish_exchanges_token_and_returns_subject(ui):
     import base64, json
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
 
-    def jwt():
-        h = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=").decode()
-        p = base64.urlsafe_b64encode(
-            json.dumps({
-                "iss": "https://sso.alien.com",
-                "sub": "user-1",
-                "aud": "prov-1",
-                "exp": int(time.time()) + 3600,
-                "iat": int(time.time()),
-            }).encode()
-        ).rstrip(b"=").decode()
-        return f"{h}.{p}.sig"
+    # Mint a real RS256-signed id_token. Earlier the test signed with a
+    # literal `'sig'` string, which the new strict `_verify` rejects on
+    # signature check. The realistic flow needs (1) a real RSA keypair,
+    # (2) the public key served at /oauth/jwks, and (3) iss matching the
+    # configured sso_base_url + aud matching provider_address.
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub = private_key.public_key().public_numbers()
+
+    def b64u(b: bytes) -> str:
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    def b64u_uint(n: int) -> str:
+        # RFC 7518 §6.3.1.1: base64urlUInt — minimal-byte big-endian.
+        byte_len = (n.bit_length() + 7) // 8
+        return b64u(n.to_bytes(byte_len, "big"))
+
+    kid = "test-key-1"
+    jwks = {
+        "keys": [
+            {
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": kid,
+                "n": b64u_uint(pub.n),
+                "e": b64u_uint(pub.e),
+            }
+        ]
+    }
+
+    def jwt() -> str:
+        header = {"alg": "RS256", "typ": "JWT", "kid": kid}
+        # iss MUST match the verifier's expected_issuer (default = sso_base_url
+        # = SSO). aud MUST match provider_address ('prov-1' from the fixture).
+        payload = {
+            "iss": SSO,
+            "sub": "user-1",
+            "aud": "prov-1",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+        }
+        h = b64u(json.dumps(header, separators=(",", ":")).encode())
+        p = b64u(json.dumps(payload, separators=(",", ":")).encode())
+        signing_input = f"{h}.{p}".encode()
+        sig = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{h}.{p}.{b64u(sig)}"
 
     # Pre-populate the verifier (normally generate_deeplink does this)
     ui.client._storage.set("alien-sso_code_verifier", "stored-verifier")
+    # Inject the JWKS via the test seam — JwksCache uses a sync httpx
+    # call internally and respx only intercepts async routes, so a
+    # nock-style mock of GET /oauth/jwks doesn't fire. Inject directly.
+    ui.client._jwks_cache.inject(jwks)
 
     with respx.mock(base_url=SSO) as router:
         router.post("/oauth/token").respond(
