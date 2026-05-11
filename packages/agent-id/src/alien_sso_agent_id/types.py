@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, TypedDict, Union
+from typing import Any, Optional, Protocol, TypedDict
 
 
 class JWK(TypedDict, total=False):
@@ -17,92 +17,78 @@ class JWKS(TypedDict):
     keys: list[JWK]
 
 
-class OwnerBinding(TypedDict, total=False):
-    payload: dict[str, Any]
-    payloadHash: str
-    signature: str
+class DPoPJtiStore(Protocol):
+    """Pluggable replay-protection store for the DPoP proof's `jti` claim
+    (RFC 9449 §11.1). Default in-memory store is single-process — pass a
+    Redis/Memcached-backed implementation to share replay state across
+    resource-server instances."""
+
+    def has(self, jti: str) -> bool: ...
+    def add(self, jti: str, iat: int) -> None: ...
 
 
 @dataclass(frozen=True)
-class VerifyOptions:
-    """Options for `verify_agent_token`.
+class VerifyDPoPOptions:
+    """Options for `verify_dpop_request`.
 
-    max_age_ms: Maximum token age in milliseconds. Default: 300000 (5 min).
-    clock_skew_ms: Allowed clock skew in milliseconds for future-dated tokens.
-        Default: 30000 (30 sec).
-    """
+    `jwks` is the pre-fetched SSO JWKS (RFC 9068 §4 access-token signature key).
 
-    max_age_ms: int = 5 * 60 * 1000
-    clock_skew_ms: int = 30 * 1000
+    `expected_issuer` defaults to Alien SSO's production endpoint when omitted
+    (RFC 7519 §4.1.1).
 
+    `expected_audience` is optional — when provided, the AT `aud` claim MUST
+    include it (RFC 7519 §4.1.3). When omitted, the audience check is skipped
+    (the SSO's signature still binds the AT to its issuer).
 
-@dataclass(frozen=True)
-class VerifyOwnerOptions:
-    """Options for `verify_agent_token_with_owner`.
+    `proof_max_age_sec` is the DPoP proof freshness window (RFC 9449 §4.3 step 11).
+    Default: 30.
 
-    `expected_audience` is REQUIRED. Per RFC 7519 §4.1.3 / OIDC §3.1.3.7
-    the consuming Client MUST identify itself in the id_token's aud
-    claim, and that identity is the Client's own OAuth ``client_id``
-    (its ``providerAddress``) — the library cannot guess it because each
-    integrating app registers a distinct value.
+    `clock_skew_sec` is applied to access_token `exp`. Default: 30.
 
-    `expected_issuer` is optional and defaults to the Alien SSO
-    production endpoint (``DEFAULT_SSO_BASE_URL``). Override only when
-    verifying tokens from a non-default deployment (staging, self-host,
-    integration tests).
-
-    `expected_audience` may be a single string or a list.
-
-    `trusted_audiences` is the OIDC §3.1.3.7 step 3 trust set: when the
-    id_token's aud is multi-valued, every entry MUST be in this set.
-    Defaults to the expected_audience(s) when omitted.
+    `jti_store` is the replay-protection store for the DPoP proof's `jti`.
+    Default: an in-memory dict scoped to the verifier's import (single-process).
+    Inject a shared store for multi-instance deployments.
     """
 
     jwks: JWKS
-    expected_audience: Union[str, list[str]]
     expected_issuer: Optional[str] = None
-    max_age_ms: int = 5 * 60 * 1000
-    clock_skew_ms: int = 30 * 1000
-    trusted_audiences: Optional[frozenset[str]] = None
+    expected_audience: Optional[str] = None
+    proof_max_age_sec: int = 30
+    clock_skew_sec: int = 30
+    jti_store: Optional[DPoPJtiStore] = None
 
 
 @dataclass(frozen=True)
-class VerifySuccess:
-    fingerprint: str
-    public_key_pem: str
-    owner: Optional[str]
-    owner_verified: bool
-    timestamp: int
-    nonce: str
+class VerifyDPoPSuccess:
+    """Successful verify_dpop_request result.
+
+    `sub` is the access_token's `sub` claim (the human owner).
+    `jkt` is the RFC 7638 thumbprint of the agent's DPoP key (matches AT `cnf.jkt`).
+    `access_token_claims` is the decoded access_token claim set (RFC 9068 §2.2).
+    `proof_claims` is the decoded DPoP proof claim set (RFC 9449 §4.2).
+    """
+
+    sub: str
+    jkt: str
+    access_token_claims: dict[str, Any]
+    proof_claims: dict[str, Any]
     ok: bool = True
 
 
 @dataclass(frozen=True)
-class VerifyOwnerSuccess:
-    fingerprint: str
-    public_key_pem: str
-    owner: str
-    timestamp: int
-    nonce: str
-    issuer: str
-    owner_verified: bool = True
-    ok: bool = True
+class VerifyDPoPFailure:
+    """Failed verify_dpop_request result.
 
+    `code` is a machine-readable error label aligned with RFC 9449 / RFC 9068
+    / RFC 6750 categories (e.g. `invalid_token`, `bad_proof_signature`,
+    `jkt_mismatch`). Stable across releases; new values may be added.
 
-@dataclass(frozen=True)
-class VerifyFailure:
+    `error` is a human-readable error message.
+    """
+
+    code: str
     error: str
     ok: bool = False
 
 
-VerifyResult = Union[VerifySuccess, VerifyOwnerSuccess, VerifyFailure]
-
-
-@dataclass(frozen=True)
-class AgentIdentity:
-    """Compact, friendly result type for callers that only care about identity."""
-
-    fingerprint: str
-    owner: Optional[str]
-    public_key_pem: str
-    owner_verified: bool
+VerifyDPoPResult = VerifyDPoPSuccess | VerifyDPoPFailure

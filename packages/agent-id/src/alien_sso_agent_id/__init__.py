@@ -1,49 +1,39 @@
-"""Verify Alien Agent ID tokens.
+"""Verify Alien Agent SSO DPoP requests.
 
-The agent calls your service with `Authorization: AgentID <base64url-json>`.
-The token is self-contained — it carries the agent's Ed25519 public key, so
-verification needs no prior key registration. Owner-bound tokens additionally
-carry the SSO `ownerBinding` and `idToken`, verified against Alien SSO's JWKS
-to prove the human owner actually authorized this agent.
+Resource servers receive an RFC 9449 two-header pair from the agent:
+
+    Authorization: DPoP <access_token>
+    DPoP: <proof JWT>
+
+`verify_dpop_request` walks the full RFC 9449 §4.3 checklist (plus the
+§6.1 / RFC 7800 §3.1 cnf.jkt binding and the RFC 9068 §4 access-token
+claim checks) and returns the human owner (`sub`) plus the agent's
+DPoP key thumbprint (`jkt`) on success.
 
 Python port of `@alien-id/sso-agent-id`.
 """
 
 from alien_sso_agent_id.jwks import DEFAULT_SSO_BASE_URL, fetch_alien_jwks
 from alien_sso_agent_id.types import (
-    AgentIdentity,
-    OwnerBinding,
-    VerifyFailure,
-    VerifyOwnerOptions,
-    VerifyOwnerSuccess,
-    VerifyOptions,
-    VerifyResult,
-    VerifySuccess,
     JWK,
     JWKS,
+    DPoPJtiStore,
+    VerifyDPoPFailure,
+    VerifyDPoPOptions,
+    VerifyDPoPResult,
+    VerifyDPoPSuccess,
 )
-from alien_sso_agent_id.verify import (
-    verify_agent_request,
-    verify_agent_request_with_owner,
-    verify_agent_token,
-    verify_agent_token_with_owner,
-)
+from alien_sso_agent_id.verify import verify_dpop_request
 
 __all__ = [
-    "AgentIdentity",
     "DEFAULT_SSO_BASE_URL",
+    "DPoPJtiStore",
     "JWK",
     "JWKS",
-    "OwnerBinding",
-    "VerifyFailure",
-    "VerifyOptions",
-    "VerifyOwnerOptions",
-    "VerifyOwnerSuccess",
-    "VerifyResult",
-    "VerifySuccess",
+    "VerifyDPoPFailure",
+    "VerifyDPoPOptions",
+    "VerifyDPoPResult",
+    "VerifyDPoPSuccess",
     "fetch_alien_jwks",
-    "verify_agent_request",
-    "verify_agent_request_with_owner",
-    "verify_agent_token",
-    "verify_agent_token_with_owner",
+    "verify_dpop_request",
 ]

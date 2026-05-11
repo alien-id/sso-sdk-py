@@ -31,6 +31,15 @@ class _ParsedJwt:
     payload: dict[str, Any]
 
 
+def _reject_json_constant(c: str) -> None:
+    # RFC 8259 §6: JSON numbers do not include NaN/Infinity. Python's
+    # default json.loads(allow_nan=True) accepts them as a non-standard
+    # extension — disable so an attacker can't smuggle a NaN through a
+    # NumericDate check (`typeof === number` would pass, then `now - NaN`
+    # is NaN which compares false to any threshold).
+    raise ValueError(f"Invalid JSON: non-standard constant {c!r}")
+
+
 def parse_jwt(token: str) -> _ParsedJwt:
     parts = token.split(".")
     # RFC 7516 §9: JWEs have five segments separated by four periods. The
@@ -42,8 +51,8 @@ def parse_jwt(token: str) -> _ParsedJwt:
     if len(parts) != 3:
         raise ValueError("Invalid JWT: expected 3 parts")
     header_b64, payload_b64, sig_b64 = parts
-    header = json.loads(b64url_decode(header_b64))
-    payload = json.loads(b64url_decode(payload_b64))
+    header = json.loads(b64url_decode(header_b64), parse_constant=_reject_json_constant)
+    payload = json.loads(b64url_decode(payload_b64), parse_constant=_reject_json_constant)
     # RFC 7519 §7.2 steps 2 & 7: JOSE Header and JWT Claims Set MUST be
     # JSON objects. Reject literals (null, strings, arrays).
     if not isinstance(header, dict) or not isinstance(payload, dict):
