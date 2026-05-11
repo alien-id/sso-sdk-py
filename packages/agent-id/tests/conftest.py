@@ -90,6 +90,25 @@ def fingerprint_pem(pem: str) -> str:
     return hashlib.sha256(der).hexdigest()
 
 
+def ed25519_thumbprint(pem: str) -> str:
+    """RFC 7638 thumbprint for an Ed25519 public key (PEM-encoded SPKI).
+
+    Mirrors ``ed25519_jwk_thumbprint`` in
+    ``src/alien_sso_agent_id/_crypto.py`` so the test fixture stays
+    decoupled from the production helper while producing the
+    byte-identical ``jkt`` the verifier checks against ``cnf.jkt``.
+    """
+    pub = serialization.load_pem_public_key(pem.encode("ascii"))
+    der = pub.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    # SPKI for Ed25519 is 12 bytes of fixed prefix + 32 raw key bytes.
+    x = b64url(der[12:])
+    canonical = f'{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}'.encode("ascii")
+    return b64url(hashlib.sha256(canonical).digest())
+
+
 def sha256_hex(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
@@ -199,19 +218,27 @@ def build_full_chain_token(
     omit_owner_binding: bool = False,
     omit_id_token: bool = False,
     omit_owner: bool = False,
+    omit_cnf: bool = False,
     timestamp: int | None = None,
 ) -> FullChainBuild:
     agent_keys = agent_keys or generate_ed25519()
     rsa = rsa or generate_rsa()
     fp = fingerprint_pem(agent_keys.public_key_pem)
 
-    id_token_payload = {
+    # Default `cnf.jkt` binds the id_token to the agent key per RFC 7800
+    # §3.1 / RFC 9449 §6.1; the verifier rejects tokens that lack it.
+    # Tests can drop the claim with `omit_cnf` or override via
+    # `id_token_payload_overrides["cnf"]` to reach the binding failure
+    # modes.
+    id_token_payload: dict[str, Any] = {
         "iss": "https://sso.alien-api.com",
         "sub": owner,
         "aud": "test-provider",
         "exp": int(time.time()) + 3600,
         "iat": int(time.time()),
     }
+    if not omit_cnf:
+        id_token_payload["cnf"] = {"jkt": ed25519_thumbprint(agent_keys.public_key_pem)}
     if id_token_payload_overrides:
         id_token_payload.update(id_token_payload_overrides)
     id_token = id_token_override or build_jwt(id_token_payload, rsa.private_key, rsa_kid)

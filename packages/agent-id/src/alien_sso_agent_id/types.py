@@ -38,11 +38,32 @@ class VerifyOptions:
 
 @dataclass(frozen=True)
 class VerifyOwnerOptions:
-    """Options for `verify_agent_token_with_owner`. Adds a required JWKS."""
+    """Options for `verify_agent_token_with_owner`.
+
+    `expected_audience` is REQUIRED. Per RFC 7519 §4.1.3 / OIDC §3.1.3.7
+    the consuming Client MUST identify itself in the id_token's aud
+    claim, and that identity is the Client's own OAuth ``client_id``
+    (its ``providerAddress``) — the library cannot guess it because each
+    integrating app registers a distinct value.
+
+    `expected_issuer` is optional and defaults to the Alien SSO
+    production endpoint (``DEFAULT_SSO_BASE_URL``). Override only when
+    verifying tokens from a non-default deployment (staging, self-host,
+    integration tests).
+
+    `expected_audience` may be a single string or a list.
+
+    `trusted_audiences` is the OIDC §3.1.3.7 step 3 trust set: when the
+    id_token's aud is multi-valued, every entry MUST be in this set.
+    Defaults to the expected_audience(s) when omitted.
+    """
 
     jwks: JWKS
+    expected_audience: Union[str, list[str]]
+    expected_issuer: Optional[str] = None
     max_age_ms: int = 5 * 60 * 1000
     clock_skew_ms: int = 30 * 1000
+    trusted_audiences: Optional[frozenset[str]] = None
 
 
 @dataclass(frozen=True)
