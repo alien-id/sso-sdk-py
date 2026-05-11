@@ -44,7 +44,7 @@ from alien_sso_solana.schema import (
     SolanaPollResponse,
 )
 
-DEFAULT_SSO_BASE_URL = "https://sso.alien.com"
+DEFAULT_SSO_BASE_URL = "https://sso.alien-api.com"
 DEFAULT_POLLING_INTERVAL = 5.0
 
 DEFAULT_CREDENTIAL_SIGNER_PROGRAM_ID = "9cstDz8WWRAFaq1vVpTjfHz6tjgh6SJaqYFeZWi1pFHG"

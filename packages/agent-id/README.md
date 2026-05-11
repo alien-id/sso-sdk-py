@@ -38,7 +38,6 @@ if not result.ok:
 # result.fingerprint           — stable agent identity
 # result.owner                 — human owner's AlienID address
 # result.owner_verified        — True: cryptographically proven via Alien SSO
-# result.owner_proof_verified  — True if the optional consent signature was present
 # result.issuer                — "https://sso.alien-api.com"
 ```
 

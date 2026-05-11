@@ -36,7 +36,7 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 sso = AlienSsoClient(AlienSsoClientConfig(
-    sso_base_url="https://sso.alien.com",
+    sso_base_url="https://sso.alien-api.com",
     provider_address="<your-provider>",
 ))
 ui = SsoUi(client=sso, api_base="/sso")

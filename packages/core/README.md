@@ -23,7 +23,7 @@ from alien_sso import AlienSsoClient, AlienSsoClientConfig, FileStorage
 async def main():
     async with AlienSsoClient(
         AlienSsoClientConfig(
-            sso_base_url="https://sso.alien.com",
+            sso_base_url="https://sso.alien-api.com",
             provider_address="<your-provider-address>",
         ),
         storage=FileStorage("~/.cache/myapp/sso.json"),
