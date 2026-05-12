@@ -47,11 +47,7 @@ def handle(req) -> tuple[int, dict]:
             "url": str(req.url),
             "headers": dict(req.headers),
         },
-        VerifyDPoPOptions(
-            jwks=JWKS,
-            expected_issuer="https://sso.alien-api.com",
-            expected_audience="my-resource-server",   # your OAuth client_id
-        ),
+        VerifyDPoPOptions(jwks=JWKS),
     )
     if not result.ok:
         return 401, {"error": result.error}  # set WWW-Authenticate: DPoP …
@@ -61,9 +57,43 @@ def handle(req) -> tuple[int, dict]:
     return 200, {"owner": result.sub}
 ```
 
+That's the full integration for a service that wants to accept any agent on
+the Alien network. `expected_issuer` defaults to `https://sso.alien-api.com`
+and `expected_audience` defaults to that same value — see
+[Federated audience](#federated-audience) for the rationale and when to
+override.
+
 The verifier needs the *full* request: method, URL, and headers. It uses these
 to compare the proof's `htm` and `htu` claims against the actual request
 (RFC 9449 §4.3 steps 8–9).
+
+## Federated audience
+
+The Alien SSO mints every access token with `aud = [client_id, issuer]`. By
+default the verifier checks that `aud` contains `expected_issuer` — i.e. the
+token was minted by the Alien SSO at all. This is the "federated audience"
+pattern: every Alien-aware service treats the SSO issuer URL as its own
+audience identifier, so one agent identity works against the whole network
+with no per-service configuration.
+
+The default is also defense-in-depth on top of the existing `typ == at+jwt`
+check: an `id+jwt` from the same SSO has `aud = client_id` only (no issuer),
+so even if the `typ` check were ever weakened the federated-audience default
+would reject it.
+
+Override `expected_audience` only when you specifically want to *narrow*
+acceptance:
+
+```python
+# Scope to agents bound to your own OAuth client only:
+VerifyDPoPOptions(jwks=JWKS, expected_audience="YOUR_CLIENT_ID")
+
+# Scope to an RFC 8707 resource indicator (when SSO/agent support lands):
+VerifyDPoPOptions(jwks=JWKS, expected_audience="https://your.service/api")
+
+# Skip the audience check entirely (test fixtures only):
+VerifyDPoPOptions(jwks=JWKS, expected_audience=False)
+```
 
 ## API
 
@@ -83,7 +113,7 @@ to compare the proof's `htm` and `htu` claims against the actual request
 | --- | --- | --- |
 | `jwks` | `JWKS` | Pre-fetched JWKS from the SSO (see `fetch_alien_jwks`). |
 | `expected_issuer` | `str \| None` | Defaults to `https://sso.alien-api.com`. Override for staging/self-hosted SSO. |
-| `expected_audience` | `str \| None` | Optional. When set, the access-token `aud` claim MUST include it. |
+| `expected_audience` | `str \| Literal[False] \| None` | Defaults to `expected_issuer` (federated audience). Pass a string to scope to a specific OAuth `client_id` or RFC 8707 resource. Pass `False` to skip (test fixtures only). |
 | `proof_max_age_sec` | `int` | DPoP proof freshness window. Default `30`. |
 | `clock_skew_sec` | `int` | Clock skew applied to access-token `exp`. Default `30`. |
 | `jti_store` | `DPoPJtiStore \| None` | Replay-protection store. Default: in-memory dict scoped to this import (capped at 10,000 entries). |
@@ -141,10 +171,7 @@ from alien_sso_agent_id import VerifyDPoPSuccess, fetch_alien_jwks
 from alien_sso_agent_id.fastapi import build_require_dpop
 
 app = FastAPI()
-require_dpop = build_require_dpop(
-    jwks=fetch_alien_jwks(),
-    expected_audience="my-resource-server",
-)
+require_dpop = build_require_dpop(jwks=fetch_alien_jwks())
 
 @app.get("/me")
 def me(auth: VerifyDPoPSuccess = Depends(require_dpop)):
@@ -172,7 +199,7 @@ def require_dpop():
             "url": request.url,
             "headers": dict(request.headers),
         },
-        VerifyDPoPOptions(jwks=JWKS, expected_audience="my-resource-server"),
+        VerifyDPoPOptions(jwks=JWKS),
     )
     if not result.ok:
         resp = jsonify(error=result.error)
@@ -202,7 +229,7 @@ class DPoPMiddleware(BaseHTTPMiddleware):
                 "url": str(request.url),
                 "headers": dict(request.headers),
             },
-            VerifyDPoPOptions(jwks=JWKS, expected_audience="my-resource-server"),
+            VerifyDPoPOptions(jwks=JWKS),
         )
         if not result.ok:
             return JSONResponse(

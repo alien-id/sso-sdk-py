@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, TypedDict
+from typing import Any, Literal, Optional, Protocol, TypedDict, Union
 
 
 class JWK(TypedDict, total=False):
@@ -36,9 +36,12 @@ class VerifyDPoPOptions:
     `expected_issuer` defaults to Alien SSO's production endpoint when omitted
     (RFC 7519 §4.1.1).
 
-    `expected_audience` is optional — when provided, the AT `aud` claim MUST
-    include it (RFC 7519 §4.1.3). When omitted, the audience check is skipped
-    (the SSO's signature still binds the AT to its issuer).
+    `expected_audience` defaults to `expected_issuer` (the federated-audience
+    pattern: the Alien SSO mints `aud = [client_id, issuer]` so any agent-id
+    token presented to any Alien-aware RS satisfies the default check). Pass an
+    explicit string to narrow to a specific OAuth `client_id` or RFC 8707
+    resource indicator. Pass `False` to skip the audience check entirely
+    (test fixtures only — discouraged in production).
 
     `proof_max_age_sec` is the DPoP proof freshness window (RFC 9449 §4.3 step 11).
     Default: 30.
@@ -52,7 +55,7 @@ class VerifyDPoPOptions:
 
     jwks: JWKS
     expected_issuer: Optional[str] = None
-    expected_audience: Optional[str] = None
+    expected_audience: Union[str, Literal[False], None] = None
     proof_max_age_sec: int = 30
     clock_skew_sec: int = 30
     jti_store: Optional[DPoPJtiStore] = None

@@ -89,7 +89,11 @@ def _mint_access_token(
     payload: dict[str, Any] = {
         "iss": iss if iss is not None else EXPECTED_ISSUER,
         "sub": sub,
-        "aud": aud if aud is not None else EXPECTED_AUDIENCE,
+        # Mirror the SSO's `aud = [client_id, issuer]` shape so the
+        # federated-audience default succeeds when callers don't pin
+        # expected_audience. Tests that exercise scope-specific behavior
+        # override this via the `aud` kwarg.
+        "aud": aud if aud is not None else [EXPECTED_AUDIENCE, EXPECTED_ISSUER],
         "iat": iat if iat is not None else now,
         "exp": exp if exp is not None else now + 600,
         "cnf": {"jkt": agent_jkt},
@@ -470,6 +474,33 @@ def test_accepts_htu_with_query_or_fragment_stripped():
     assert result.ok, getattr(result, "error", None)
 
 
+def test_accepts_htu_with_default_port_stripped():
+    # WHATWG URL semantics: `https://h:443/p` normalizes to `https://h/p`.
+    # The verifier must accept either side carrying the explicit default
+    # port, matching `new URL(...).toString()` in the JS SDK.
+    b = _build_request(
+        url="https://api.example.test/v1/whoami",
+        proof_kwargs={"htu": "https://api.example.test:443/v1/whoami"},
+    )
+    result = verify_dpop_request(
+        b["req"], VerifyDPoPOptions(jwks=b["jwks"], expected_issuer=EXPECTED_ISSUER)
+    )
+    assert result.ok, getattr(result, "error", None)
+
+
+def test_accepts_htu_with_host_case_difference():
+    # WHATWG lowercases the host. A request URL with mixed-case host must
+    # normalize to the same htu the agent (which uses URL.toString()) signs.
+    b = _build_request(
+        url="https://API.example.test/v1/whoami",
+        proof_kwargs={"htu": "https://api.example.test/v1/whoami"},
+    )
+    result = verify_dpop_request(
+        b["req"], VerifyDPoPOptions(jwks=b["jwks"], expected_issuer=EXPECTED_ISSUER)
+    )
+    assert result.ok, getattr(result, "error", None)
+
+
 # ─── Step 11: iat freshness ──────────────────────────────────────────────────
 
 
@@ -597,10 +628,50 @@ def test_rejects_access_token_audience_mismatch():
     )
 
 
-def test_skips_aud_check_when_expected_audience_omitted():
-    b = _build_request(access_token_kwargs={"aud": "anything"})
+# ─── Federated audience: default expected_audience falls back to expected_issuer
+# The Alien SSO mints `aud = [client_id, issuer]` so any agent-id token
+# presented to any Alien-aware RS satisfies the default check.
+
+
+def test_accepts_AT_with_issuer_in_aud_array_when_expected_audience_is_omitted():
+    b = _build_request(access_token_kwargs={"aud": [EXPECTED_AUDIENCE, EXPECTED_ISSUER]})
     result = verify_dpop_request(
         b["req"], VerifyDPoPOptions(jwks=b["jwks"], expected_issuer=EXPECTED_ISSUER)
+    )
+    assert result.ok, getattr(result, "error", None)
+
+
+def test_accepts_AT_with_aud_eq_issuer_string_when_expected_audience_is_omitted():
+    b = _build_request(access_token_kwargs={"aud": EXPECTED_ISSUER})
+    result = verify_dpop_request(
+        b["req"], VerifyDPoPOptions(jwks=b["jwks"], expected_issuer=EXPECTED_ISSUER)
+    )
+    assert result.ok, getattr(result, "error", None)
+
+
+def test_rejects_AT_whose_aud_lacks_the_issuer_when_expected_audience_is_omitted():
+    # Defends against id_token confusion: an id+jwt from the same SSO
+    # carries `aud = client_id` only (no issuer), and would have been
+    # accepted under the pre-federation "skip aud" default.
+    b = _build_request(access_token_kwargs={"aud": "some-client-id"})
+    _expect_failure(
+        verify_dpop_request(
+            b["req"], VerifyDPoPOptions(jwks=b["jwks"], expected_issuer=EXPECTED_ISSUER)
+        ),
+        "bad_access_token_aud",
+    )
+
+
+def test_accepts_AT_with_mismatching_aud_when_expected_audience_is_false():
+    # Opt-out sentinel — discouraged outside test fixtures.
+    b = _build_request(access_token_kwargs={"aud": "anything"})
+    result = verify_dpop_request(
+        b["req"],
+        VerifyDPoPOptions(
+            jwks=b["jwks"],
+            expected_issuer=EXPECTED_ISSUER,
+            expected_audience=False,
+        ),
     )
     assert result.ok, getattr(result, "error", None)
 

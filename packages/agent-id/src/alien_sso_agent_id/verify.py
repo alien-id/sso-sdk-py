@@ -51,11 +51,35 @@ class _DefaultJtiStore:
 _default_jti_store = _DefaultJtiStore()
 
 
+# WHATWG URL "special scheme" default ports — stripped during htu
+# normalization so `https://example/path` and `https://example:443/path`
+# compare equal, mirroring `new URL(...).toString()` in the JS SDK.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+
+
 def _normalize_htu(s: str) -> str:
     parts = urlsplit(s)
     if not parts.scheme or not parts.netloc:
         raise ValueError(f"htu is not an absolute URL: {s!r}")
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    # Preserve userinfo (rare in htu but kept for WHATWG parity).
+    userinfo = ""
+    if parts.username:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo += ":" + parts.password
+        userinfo += "@"
+    port = parts.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    netloc = userinfo + (host if port is None else f"{host}:{port}")
+    # WHATWG defaults the empty path to "/" for special schemes
+    # (`new URL("https://h").toString()` → `"https://h/"`).
+    path = parts.path
+    if path == "" and scheme in _DEFAULT_PORTS:
+        path = "/"
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 
 def _header_one(headers: Mapping[str, Any], name: str) -> tuple[Any, bool]:
@@ -259,18 +283,27 @@ def verify_dpop_request(
             "bad_access_token_iss",
             f"access_token iss {at.payload.get('iss')!r} != {expected_issuer}",
         )
-    if opts.expected_audience is not None:
+    # RFC 9068 §4 audience check. Default: the AT `aud` must include
+    # `expected_issuer` — the "federated audience" pattern. The Alien SSO
+    # always emits `aud = [client_id, issuer]`, so any agent-id token
+    # presented to any Alien-aware RS satisfies the default. Pass an
+    # explicit string to scope to a specific client_id/resource, or
+    # `False` to skip (test fixtures only).
+    if opts.expected_audience is not False:
+        expected_aud = (
+            opts.expected_audience if opts.expected_audience is not None else expected_issuer
+        )
         aud = at.payload.get("aud")
         # RFC 7519 §4.1.3: aud may be a string or array. Use strict
         # membership, not substring containment, on each branch.
         if isinstance(aud, list):
-            aud_ok = opts.expected_audience in aud
+            aud_ok = expected_aud in aud
         else:
-            aud_ok = aud == opts.expected_audience
+            aud_ok = aud == expected_aud
         if not aud_ok:
             return _fail(
                 "bad_access_token_aud",
-                f"access_token aud does not include {opts.expected_audience}",
+                f"access_token aud does not include {expected_aud}",
             )
     exp_claim = at.payload.get("exp")
     if (
