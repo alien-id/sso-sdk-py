@@ -1,413 +1,345 @@
-"""Token verification — Python port of `@alien-id/sso-agent-id`.
+"""RFC 9449 DPoP request verifier — Python port of
+`packages/agent-id/src/index.ts` in the JS SDK.
 
-Error strings match the JS package verbatim so callers can do equality
-checks across implementations.
+Error codes are the same machine-readable labels as the JS package so
+callers can compare across implementations.
 """
 
 from __future__ import annotations
 
-import json
+import hashlib
 import math
 import time
-from typing import Any, Mapping, Union
+from collections import OrderedDict
+from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
-from alien_sso_agent_id._b64 import b64url_decode
-from alien_sso_agent_id._canonical import canonical_json_string
-from alien_sso_agent_id._crypto import (
-    ed25519_jwk_thumbprint,
-    fingerprint_public_key_pem,
-    sha256_hex,
-    verify_ed25519_b64url,
-    verify_rs256,
-)
+from alien_sso_agent_id._b64 import b64url_encode
+from alien_sso_agent_id._crypto import jwk_thumbprint_okp, verify_eddsa_jwt, verify_rs256
 from alien_sso_agent_id.jwks import DEFAULT_SSO_BASE_URL, EncryptedIdTokenError, parse_jwt
 from alien_sso_agent_id.types import (
-    VerifyFailure,
-    VerifyOwnerOptions,
-    VerifyOwnerSuccess,
-    VerifyOptions,
-    VerifyResult,
-    VerifySuccess,
+    JWK,
+    VerifyDPoPFailure,
+    VerifyDPoPOptions,
+    VerifyDPoPResult,
+    VerifyDPoPSuccess,
 )
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+def _fail(code: str, error: str) -> VerifyDPoPFailure:
+    return VerifyDPoPFailure(code=code, error=error)
 
 
-def _fail(error: str) -> VerifyFailure:
-    return VerifyFailure(error=error)
+# Module-scoped default jti replay cache. Single-process; production
+# callers should pass a shared store via `opts.jti_store`.
+_DEFAULT_JTI_CACHE_MAX = 10_000
 
 
-_OMITTED = object()
+class _DefaultJtiStore:
+    def __init__(self) -> None:
+        self._seen: OrderedDict[str, int] = OrderedDict()
+
+    def has(self, jti: str) -> bool:
+        return jti in self._seen
+
+    def add(self, jti: str, iat: int) -> None:
+        if len(self._seen) >= _DEFAULT_JTI_CACHE_MAX:
+            self._seen.popitem(last=False)
+        self._seen[jti] = iat
 
 
-def verify_agent_token(
-    token_b64: str,
-    opts: VerifyOptions | None = None,
-) -> VerifyResult:
-    """Verify an Alien Agent ID token.
+_default_jti_store = _DefaultJtiStore()
 
-    Confirms the agent holds the private key, the fingerprint matches the
-    public key, and the token is fresh. Does NOT verify owner — see
-    `verify_agent_token_with_owner` for that.
+
+# WHATWG URL "special scheme" default ports — stripped during htu
+# normalization so `https://example/path` and `https://example:443/path`
+# compare equal, mirroring `new URL(...).toString()` in the JS SDK.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+
+
+def _normalize_htu(s: str) -> str:
+    parts = urlsplit(s)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(f"htu is not an absolute URL: {s!r}")
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    # Preserve userinfo (rare in htu but kept for WHATWG parity).
+    userinfo = ""
+    if parts.username:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo += ":" + parts.password
+        userinfo += "@"
+    port = parts.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    netloc = userinfo + (host if port is None else f"{host}:{port}")
+    # WHATWG defaults the empty path to "/" for special schemes
+    # (`new URL("https://h").toString()` → `"https://h/"`).
+    path = parts.path
+    if path == "" and scheme in _DEFAULT_PORTS:
+        path = "/"
+    return urlunsplit((scheme, netloc, path, "", ""))
+
+
+def _header_one(headers: Mapping[str, Any], name: str) -> tuple[Any, bool]:
+    """Look up a header case-insensitively.
+
+    Returns (value, is_duplicate). A duplicate is either a list-valued
+    header or two distinct entries that differ only in case.
     """
-    o = opts or VerifyOptions()
-
-    try:
-        raw = b64url_decode(token_b64).decode("utf-8")
-        parsed = json.loads(raw)
-    except Exception:
-        return _fail("Invalid token encoding")
-
-    if not isinstance(parsed, dict):
-        return _fail("Invalid token encoding")
-
-    if parsed.get("v") != 1:
-        return _fail(f"Unsupported token version: {parsed.get('v')}")
-
-    sig = parsed.get("sig")
-    fingerprint = parsed.get("fingerprint")
-    public_key_pem = parsed.get("publicKeyPem")
-    timestamp = parsed.get("timestamp")
-    nonce = parsed.get("nonce")
-    owner = parsed.get("owner", _OMITTED)
-
-    if not isinstance(sig, str):
-        return _fail("Missing or invalid field: sig")
-    if not isinstance(fingerprint, str):
-        return _fail("Missing or invalid field: fingerprint")
-    if not isinstance(public_key_pem, str):
-        return _fail("Missing or invalid field: publicKeyPem")
-    # JS check: typeof === 'number' && Number.isFinite. JSON.stringify(Infinity) → null,
-    # which is not a number — so non-finite floats and missing both fail this check.
-    if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool) or not math.isfinite(timestamp):
-        return _fail("Missing or invalid field: timestamp")
-    if not isinstance(nonce, str):
-        return _fail("Missing or invalid field: nonce")
-    if owner is not _OMITTED and owner is not None and not isinstance(owner, str):
-        return _fail("Invalid field: owner")
-
-    age = _now_ms() - int(timestamp)
-    if age < -o.clock_skew_ms or age > o.max_age_ms:
-        return _fail(f"Token expired (age: {round(age / 1000)}s)")
-
-    try:
-        computed_fp = fingerprint_public_key_pem(public_key_pem)
-    except Exception:
-        return _fail("Invalid public key in token")
-    if computed_fp != fingerprint:
-        return _fail("Fingerprint does not match public key")
-
-    payload_fields: dict[str, Any] = {
-        "v": parsed["v"],
-        "fingerprint": fingerprint,
-        "publicKeyPem": public_key_pem,
-        "timestamp": timestamp,
-        "nonce": nonce,
-    }
-    if owner is not _OMITTED:
-        payload_fields["owner"] = owner
-
-    canonical = canonical_json_string(payload_fields)
-    try:
-        sig_ok = verify_ed25519_b64url(canonical, sig, public_key_pem)
-    except Exception:
-        return _fail("Signature verification error")
-    if not sig_ok:
-        return _fail("Signature verification failed")
-
-    return VerifySuccess(
-        fingerprint=fingerprint,
-        public_key_pem=public_key_pem,
-        owner=owner if owner is not _OMITTED else None,
-        owner_verified=False,
-        timestamp=int(timestamp),
-        nonce=nonce,
-    )
+    value: Any = None
+    seen = 0
+    for k, v in headers.items():
+        if k.lower() == name.lower():
+            value = v
+            seen += 1
+    if seen == 0:
+        return None, False
+    if seen > 1:
+        return value, True
+    if isinstance(value, list):
+        return value, len(value) > 1
+    return value, False
 
 
-def verify_agent_token_with_owner(
-    token_b64: str,
-    opts: VerifyOwnerOptions,
-) -> VerifyResult:
-    """Verify a token AND its owner chain against the provided JWKS.
+def verify_dpop_request(
+    req: Mapping[str, Any],
+    opts: VerifyDPoPOptions,
+) -> VerifyDPoPResult:
+    """Verify an inbound HTTP request carrying an RFC 9449 DPoP proof
+    alongside an Alien at+jwt access token.
 
-    Steps mirror the JS `verifyAgentTokenWithOwner`:
-      1. Basic token verification (`verify_agent_token`).
-      2. ownerBinding payload hash matches.
-      3. ownerBinding signed by the agent's key.
-      4. Binding agentInstance fingerprint matches.
-      5. Binding ownerSessionSub matches the token's owner claim.
-      6. id_token hash matches binding.
-      7. id_token RS256 signature verifies against the JWKS.
-      8. id_token sub matches the token owner.
+    Walks the RFC 9449 §4.3 checklist plus the §6.1 / RFC 7800 §3.1
+    cnf.jkt binding and the RFC 9068 §4 access-token claim checks. On
+    success, the caller can trust `sub` (the human owner per the SSO's
+    signature) and `jkt` (the agent's DPoP key thumbprint per the
+    proof's own signature).
+
+    No custom envelope: every fact this function trusts is signed either
+    by the SSO (over standard at+jwt claims) or by the agent (over the
+    RFC 9449-defined DPoP proof claims).
+
+    `req` is anything with `method`, `url`, and `headers` keys. A
+    Starlette/FastAPI Request works too if accessed via its `method`,
+    `url` (str-coerced) and `headers` properties.
     """
-    basic = verify_agent_token(
-        token_b64,
-        VerifyOptions(max_age_ms=opts.max_age_ms, clock_skew_ms=opts.clock_skew_ms),
-    )
-    if not basic.ok or isinstance(basic, VerifyFailure):
-        return basic
+    method = req["method"]
+    url = req["url"]
+    headers = req["headers"]
 
-    assert isinstance(basic, VerifySuccess)
+    # §4.3 step 1: exactly one Authorization header carrying the DPoP scheme.
+    auth_value, auth_dup = _header_one(headers, "authorization")
+    if auth_dup or not isinstance(auth_value, str) or not auth_value:
+        return _fail("missing_authorization", "Missing or duplicate Authorization header")
+    # RFC 7235 §2.1: scheme names compare case-insensitively.
+    parts = auth_value.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "dpop" or not parts[1].strip():
+        return _fail("invalid_scheme", "Expected `Authorization: DPoP <access_token>`")
+    access_token = parts[1].strip()
+    if any(c.isspace() for c in access_token):
+        return _fail("invalid_scheme", "Expected `Authorization: DPoP <access_token>`")
 
-    parsed = json.loads(b64url_decode(token_b64).decode("utf-8"))
+    # §4.3 step 1: exactly one DPoP proof header.
+    dpop_value, dpop_dup = _header_one(headers, "dpop")
+    if dpop_dup or not isinstance(dpop_value, str) or not dpop_value:
+        return _fail("missing_dpop", "Missing or duplicate DPoP header")
 
-    owner_binding = parsed.get("ownerBinding")
-    id_token = parsed.get("idToken")
-
-    if not isinstance(owner_binding, dict):
-        return _fail("Missing field: ownerBinding")
-    if not isinstance(id_token, str):
-        return _fail("Missing field: idToken")
-    if not basic.owner:
-        return _fail("Token has no owner to verify")
-
-    payload = owner_binding.get("payload")
-    payload_hash = owner_binding.get("payloadHash")
-    signature = owner_binding.get("signature")
-
-    if not isinstance(payload, dict):
-        return _fail("Invalid ownerBinding.payload")
-    if not isinstance(payload_hash, str):
-        return _fail("Invalid ownerBinding.payloadHash")
-    if not isinstance(signature, str):
-        return _fail("Invalid ownerBinding.signature")
-
-    binding_canonical = canonical_json_string(payload)
-    if sha256_hex(binding_canonical) != payload_hash:
-        return _fail("Owner binding payload hash mismatch")
-
+    # §4.3 step 2: proof is a well-formed JWS.
     try:
-        binding_ok = verify_ed25519_b64url(binding_canonical, signature, basic.public_key_pem)
-    except Exception:
-        return _fail("Owner binding signature verification error")
-    if not binding_ok:
-        return _fail("Owner binding signature verification failed")
-
-    agent_instance = payload.get("agentInstance")
-    if (
-        not isinstance(agent_instance, dict)
-        or agent_instance.get("publicKeyFingerprint") != basic.fingerprint
-    ):
-        return _fail("Owner binding agent fingerprint mismatch")
-
-    if payload.get("ownerSessionSub") != basic.owner:
-        return _fail("Owner binding ownerSessionSub mismatch")
-
-    if payload.get("idTokenHash") != sha256_hex(id_token):
-        return _fail("id_token hash does not match owner binding")
-
-    try:
-        jwt = parse_jwt(id_token)
-    except EncryptedIdTokenError:
-        # OIDC §3.1.3.7 / RFC 7516: encrypted ID tokens are not supported;
-        # surface the policy explicitly rather than as a parse failure.
-        return _fail("Encrypted ID Tokens (JWE) are not supported")
-    except (ValueError, TypeError):
-        # parse_jwt raises ValueError on shape errors (split count, non-JSON,
-        # non-object header/payload) and TypeError on input-type confusion.
-        # binascii.Error is a ValueError subclass, covered here too.
-        return _fail("Invalid id_token encoding")
-
-    if jwt.header.get("alg") != "RS256":
-        return _fail(f"Unsupported id_token alg: {jwt.header.get('alg')}")
-
-    # RFC 8725 §3.7 / RFC 7515 §4.1.9: when typ is present it MUST identify
-    # this as an id_token. Reject any cross-class typ (e.g. at+jwt) so a
-    # smuggled access token cannot be accepted as an id_token.
-    typ = jwt.header.get("typ")
-    if typ is not None:
-        if not isinstance(typ, str):
-            return _fail("id_token typ must be a string")
-        typ_lc = typ.lower()
-        if typ_lc not in ("jwt", "application/jwt"):
-            return _fail(f"id_token typ {typ!r} is not jwt/application/jwt")
-
-    # RFC 7515 §4.1.11: any unrecognised critical header MUST cause
-    # rejection. We support no JWS extensions; reject any non-empty crit.
-    crit = jwt.header.get("crit")
-    if crit is not None and (not isinstance(crit, list) or len(crit) > 0):
-        return _fail("id_token contains unsupported crit header")
-
-    kid = jwt.header.get("kid")
-    matching: dict[str, Any] | None = None
-    for k in opts.jwks.get("keys", []):
-        if k.get("kid") == kid and k.get("kty") == "RSA" and (k.get("use") == "sig" or k.get("use") is None):
-            matching = k
-            break
-    if matching is None:
-        return _fail(f"No matching JWKS key for kid: {kid}")
-    # RFC 7515 §10.7: when the JWK pins an `alg`, it MUST match the JWS
-    # alg. Permissive when the JWK omits alg (RFC 7517 §4.4: optional).
-    jwk_alg = matching.get("alg")
-    if jwk_alg is not None and jwk_alg != "RS256":
-        return _fail(f"Invalid JWKS key: alg {jwk_alg} does not match RS256")
-    if not matching.get("n") or not matching.get("e"):
-        return _fail("Invalid JWKS key: missing required RSA fields (n, e)")
-
-    try:
-        rsa_ok = verify_rs256(jwt.header_b64url, jwt.payload_b64url, jwt.signature_b64url, matching)
-    except Exception:
-        return _fail("id_token signature verification error")
-    if not rsa_ok:
-        return _fail("id_token signature verification failed")
-
-    # RFC 7519 §4.1.4 / §7.2: exp MUST be in the future. OIDC Core §2
-    # makes it REQUIRED on id_token — a missing exp is a hard fail.
-    now_sec = int(time.time())
-    skew_sec = opts.clock_skew_ms // 1000
-    exp = jwt.payload.get("exp")
-    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
-        return _fail("id_token missing exp")
-    if now_sec >= int(exp) + skew_sec:
-        return _fail("id_token expired")
-    # RFC 7519 §4.1.5: when nbf is present, current time MUST be ≥ nbf.
-    nbf = jwt.payload.get("nbf")
-    if isinstance(nbf, (int, float)) and not isinstance(nbf, bool):
-        if now_sec < int(nbf) - skew_sec:
-            return _fail("id_token not yet valid")
-
-    # RFC 7519 §4.1.6: "iat" value MUST be a number containing a NumericDate
-    # value. Optional, but when present must be a numeric type (excluding bool).
-    if "iat" in jwt.payload:
-        iat = jwt.payload.get("iat")
-        if not isinstance(iat, (int, float)) or isinstance(iat, bool):
-            return _fail("id_token iat must be a NumericDate")
-
-    if jwt.payload.get("sub") != basic.owner:
-        return _fail("id_token sub does not match token owner")
-
-    # RFC 7519 §4.1.1 / RFC 9068 §5: iss MUST exactly match. When the
-    # caller omits `expected_issuer` the library pins to the Alien SSO
-    # production endpoint, since the agent-id package is single-tenant
-    # against that AS.
-    expected_issuer = opts.expected_issuer or DEFAULT_SSO_BASE_URL
-    if jwt.payload.get("iss") != expected_issuer:
-        return _fail("id_token iss does not match expected issuer")
-
-    # RFC 7519 §4.1.3: aud may be a string or array; the principal MUST
-    # be identified by at least one value when it is present.
-    aud_claim = jwt.payload.get("aud")
-    token_auds = aud_claim if isinstance(aud_claim, list) else [aud_claim]
-    expected = (
-        opts.expected_audience
-        if isinstance(opts.expected_audience, list)
-        else [opts.expected_audience]
-    )
-    if not any(a in token_auds for a in expected):
-        return _fail("id_token aud does not match expected audience")
-    # OIDC §3.1.3.7 step 3: "MUST be rejected ... if it contains additional
-    # audiences not trusted by the Client." Default trust = expected set.
-    trusted = opts.trusted_audiences if opts.trusted_audiences is not None else set(expected)
-    for a in token_auds:
-        if a not in trusted:
-            return _fail("id_token contains untrusted audience")
-
-    # OIDC Core §3.1.3.7.6 / .7: if `azp` is present, it MUST match the
-    # client_id (i.e., expected_audience). Multi-aud without `azp` is a
-    # SHOULD-level recommendation we do not enforce (the AS issued the
-    # token; we still trust the iss/aud match above).
-    azp = jwt.payload.get("azp")
-    if azp is not None:
-        if not isinstance(azp, str) or not any(a == azp for a in expected):
-            return _fail("id_token azp does not match expected audience")
-
-    # cnf.jkt MUST equal RFC 7638 thumbprint of the agent's public key
-    # (RFC 7800 §3.1 / RFC 9449 §6.1). Without this check the id_token
-    # is not bound to the presenting agent — an attacker can substitute
-    # their own keypair across the binding payload + proof bundle while
-    # reusing a stolen id_token verbatim. Anchors at the agent key, not
-    # the binding's self-embedded key.
-    try:
-        expected_jkt = ed25519_jwk_thumbprint(basic.public_key_pem)
+        proof = parse_jwt(dpop_value)
+    except EncryptedIdTokenError as err:
+        return _fail("malformed_proof", f"Proof not a valid JWS: {err}")
     except (ValueError, TypeError) as err:
-        return _fail(f"cnf.jkt anchor: {err}")
-    cnf = jwt.payload.get("cnf")
-    actual_jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
-    if not isinstance(actual_jkt, str) or not actual_jkt:
-        return _fail("id_token missing cnf.jkt")
-    if actual_jkt != expected_jkt:
-        return _fail("id_token cnf.jkt does not bind to agent key")
+        return _fail("malformed_proof", f"Proof not a valid JWS: {err}")
 
-    issuer = jwt.payload.get("iss")
-    return VerifyOwnerSuccess(
-        fingerprint=basic.fingerprint,
-        public_key_pem=basic.public_key_pem,
-        owner=basic.owner,
-        timestamp=basic.timestamp,
-        nonce=basic.nonce,
-        issuer=issuer if isinstance(issuer, str) else "",
+    # §4.3 step 4: typ MUST be dpop+jwt.
+    if proof.header.get("typ") != "dpop+jwt":
+        return _fail(
+            "bad_proof_typ",
+            f"Proof typ must be 'dpop+jwt', got {proof.header.get('typ')!r}",
+        )
+    # §4.3 step 5: alg MUST be asymmetric, not none. Alien agents are
+    # Ed25519, so EdDSA only.
+    if proof.header.get("alg") != "EdDSA":
+        return _fail(
+            "bad_proof_alg",
+            f"Proof alg must be 'EdDSA', got {proof.header.get('alg')!r}",
+        )
+    # §4.3 step 6: jwk in header, public only.
+    proof_jwk = proof.header.get("jwk")
+    if not isinstance(proof_jwk, dict):
+        return _fail("missing_proof_jwk", "Proof header missing `jwk`")
+    if (
+        proof_jwk.get("kty") != "OKP"
+        or proof_jwk.get("crv") != "Ed25519"
+        or not isinstance(proof_jwk.get("x"), str)
+    ):
+        return _fail("bad_proof_jwk", "Proof jwk must be {kty:OKP, crv:Ed25519, x}")
+    if "d" in proof_jwk:
+        return _fail("private_in_proof_jwk", "Proof jwk leaks private member `d`")
+
+    # §4.3 step 7: signature verifies with the embedded jwk.
+    try:
+        proof_sig_ok = verify_eddsa_jwt(
+            proof.header_b64url,
+            proof.payload_b64url,
+            proof.signature_b64url,
+            proof_jwk,
+        )
+    except Exception as err:  # noqa: BLE001 — surface as failure code
+        return _fail("proof_sig_error", str(err))
+    if not proof_sig_ok:
+        return _fail("bad_proof_signature", "Proof signature failed verification")
+
+    # §4.3 step 8: htm matches request method (case-sensitive per RFC 9449 §4.2).
+    if proof.payload.get("htm") != method:
+        return _fail(
+            "bad_proof_htm",
+            f"Proof htm {proof.payload.get('htm')!r} != request method {method!r}",
+        )
+
+    # §4.3 step 9: htu matches request URL, query+fragment stripped, with
+    # symmetric URL normalization.
+    try:
+        request_htu = _normalize_htu(url)
+        claimed_htu = _normalize_htu(str(proof.payload.get("htu")))
+    except Exception:
+        return _fail("bad_proof_htu", "Proof htu is not a parseable URL")
+    if claimed_htu != request_htu:
+        return _fail("bad_proof_htu", f"Proof htu {claimed_htu} != request URL {request_htu}")
+
+    # §4.3 step 11: iat within ±max_age window.
+    proof_max_age = opts.proof_max_age_sec
+    iat_claim = proof.payload.get("iat")
+    # RFC 7519 §4.1.6 NumericDate: a JSON number representing seconds since
+    # the epoch. Python's json.loads accepts NaN/Infinity by default
+    # (non-standard JSON); reject them so they can't bypass freshness.
+    if (
+        not isinstance(iat_claim, (int, float))
+        or isinstance(iat_claim, bool)
+        or not math.isfinite(iat_claim)
+    ):
+        return _fail("bad_proof_iat", "Proof iat is not a NumericDate")
+    now_sec = int(time.time())
+    age_sec = now_sec - int(iat_claim)
+    if age_sec > proof_max_age:
+        return _fail("stale_proof", f"Proof age {age_sec}s > max {proof_max_age}s")
+    if age_sec < -proof_max_age:
+        return _fail("future_proof", f"Proof iat {-age_sec}s in the future")
+
+    # §4.3 step 12: jti not previously seen.
+    jti_claim = proof.payload.get("jti")
+    if not isinstance(jti_claim, str) or not jti_claim:
+        return _fail("missing_proof_jti", "Proof missing jti")
+    jti_store = opts.jti_store if opts.jti_store is not None else _default_jti_store
+    if jti_store.has(jti_claim):
+        return _fail("replayed_proof_jti", "Proof jti has already been seen")
+
+    # §4.3 step 10 + RFC 9068 §4: parse + verify the access_token.
+    try:
+        at = parse_jwt(access_token)
+    except EncryptedIdTokenError as err:
+        return _fail("malformed_access_token", f"access_token not a JWS: {err}")
+    except (ValueError, TypeError) as err:
+        return _fail("malformed_access_token", f"access_token not a JWS: {err}")
+    # RFC 9068 §2.1 + §4: typ MUST be at+jwt (or application/at+jwt).
+    at_typ_raw = at.header.get("typ")
+    at_typ_lc = at_typ_raw.lower() if isinstance(at_typ_raw, str) else ""
+    if at_typ_lc not in ("at+jwt", "application/at+jwt"):
+        return _fail(
+            "bad_access_token_typ",
+            f"access_token typ must be 'at+jwt' (RFC 9068 §4), got {at_typ_raw!r}",
+        )
+
+    # Resolve the signing key from the SSO JWKS.
+    at_alg = at.header.get("alg")
+    if at_alg != "RS256":
+        return _fail("bad_access_token_alg", f"access_token alg must be RS256, got {at_alg!r}")
+    kid = at.header.get("kid")
+    jwk: JWK | None = None
+    for k in opts.jwks.get("keys", []):
+        if (
+            k.get("kid") == kid
+            and k.get("kty") == "RSA"
+            and (k.get("use") == "sig" or k.get("use") is None)
+            and (not k.get("alg") or k.get("alg") == "RS256")
+        ):
+            jwk = k
+            break
+    if jwk is None:
+        return _fail("unknown_access_token_kid", f"No JWKS entry for kid={kid!r}")
+    try:
+        at_sig_ok = verify_rs256(at.header_b64url, at.payload_b64url, at.signature_b64url, jwk)
+    except Exception as err:  # noqa: BLE001
+        return _fail("access_token_sig_error", str(err))
+    if not at_sig_ok:
+        return _fail("bad_access_token_signature", "access_token signature failed verification")
+
+    # RFC 9068 §4: claim checks.
+    expected_issuer = opts.expected_issuer if opts.expected_issuer is not None else DEFAULT_SSO_BASE_URL
+    if at.payload.get("iss") != expected_issuer:
+        return _fail(
+            "bad_access_token_iss",
+            f"access_token iss {at.payload.get('iss')!r} != {expected_issuer}",
+        )
+    # RFC 9068 §4 audience check. Default: the AT `aud` must include
+    # `expected_issuer` — the "federated audience" pattern. The Alien SSO
+    # always emits `aud = [client_id, issuer]`, so any agent-id token
+    # presented to any Alien-aware RS satisfies the default. Pass an
+    # explicit string to scope to a specific client_id/resource, or
+    # `False` to skip (test fixtures only).
+    if opts.expected_audience is not False:
+        expected_aud = (
+            opts.expected_audience if opts.expected_audience is not None else expected_issuer
+        )
+        aud = at.payload.get("aud")
+        # RFC 7519 §4.1.3: aud may be a string or array. Use strict
+        # membership, not substring containment, on each branch.
+        if isinstance(aud, list):
+            aud_ok = expected_aud in aud
+        else:
+            aud_ok = aud == expected_aud
+        if not aud_ok:
+            return _fail(
+                "bad_access_token_aud",
+                f"access_token aud does not include {expected_aud}",
+            )
+    exp_claim = at.payload.get("exp")
+    if (
+        not isinstance(exp_claim, (int, float))
+        or isinstance(exp_claim, bool)
+        or not math.isfinite(exp_claim)
+        or int(exp_claim) + opts.clock_skew_sec <= now_sec
+    ):
+        return _fail("expired_access_token", "access_token is expired")
+    sub_claim = at.payload.get("sub")
+    if not isinstance(sub_claim, str) or not sub_claim:
+        return _fail("missing_access_token_sub", "access_token missing sub")
+
+    # §6.1 + RFC 7800 §3.1: cnf.jkt MUST equal thumbprint(proof.jwk).
+    cnf = at.payload.get("cnf")
+    at_jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
+    if not isinstance(at_jkt, str) or not at_jkt:
+        return _fail("missing_cnf_jkt", "access_token missing cnf.jkt")
+    proof_jkt = jwk_thumbprint_okp(proof_jwk)
+    if at_jkt != proof_jkt:
+        return _fail(
+            "jkt_mismatch",
+            f"access_token cnf.jkt {at_jkt} != proof jwk thumbprint {proof_jkt}",
+        )
+
+    # §4.3 step 10: ath = b64url(sha256(access_token)).
+    expected_ath = b64url_encode(hashlib.sha256(access_token.encode("utf-8")).digest())
+    if proof.payload.get("ath") != expected_ath:
+        return _fail("bad_proof_ath", "Proof ath does not match sha256(access_token)")
+
+    # All checks passed — record jti and return.
+    jti_store.add(jti_claim, int(iat_claim))
+
+    return VerifyDPoPSuccess(
+        sub=sub_claim,
+        jkt=proof_jkt,
+        access_token_claims=dict(at.payload),
+        proof_claims=dict(proof.payload),
     )
-
-
-# ─── Request helpers ──────────────────────────────────────────────────────
-
-_HeadersLike = Union[Mapping[str, Any], Any]
-
-
-def _extract_token(headers: _HeadersLike) -> tuple[str | None, VerifyFailure | None]:
-    """Pull the AgentID token from a request-like object's headers.
-
-    Accepts:
-    - Mapping[str, str] (case-insensitive lookup attempted)
-    - Anything with a `.get()` (Starlette Headers, http.Headers, etc.)
-    - Anything with a `.headers` attribute that is itself headers-like
-    """
-    auth = _header_value(headers, "authorization")
-    if isinstance(auth, list):
-        return None, _fail("Multiple Authorization headers")
-    if not isinstance(auth, str) or not auth.startswith("AgentID "):
-        return None, _fail("Missing header: Authorization: AgentID <token>")
-    return auth[len("AgentID "):].strip(), None
-
-
-def _header_value(source: Any, name: str) -> Any:
-    headers = getattr(source, "headers", None)
-    if headers is None and isinstance(source, Mapping) and "headers" in source:
-        headers = source["headers"]
-    if headers is None:
-        headers = source
-    if hasattr(headers, "getlist"):
-        try:
-            values = headers.getlist(name)
-            if len(values) > 1:
-                return values
-            if len(values) == 1:
-                return values[0]
-        except Exception:
-            pass
-    if hasattr(headers, "get"):
-        v = headers.get(name)
-        if v is None:
-            v = headers.get(name.lower())
-        if v is None:
-            v = headers.get(name.title())
-        return v
-    if isinstance(headers, Mapping):
-        for k, v in headers.items():
-            if k.lower() == name.lower():
-                return v
-    return None
-
-
-def verify_agent_request(req: _HeadersLike, opts: VerifyOptions | None = None) -> VerifyResult:
-    """Extract and verify an Agent ID token from an HTTP request.
-
-    Works with anything exposing a `headers` mapping — Starlette `Request`,
-    Flask `request`, raw dicts, etc.
-    """
-    token, err = _extract_token(req)
-    if err is not None:
-        return err
-    assert token is not None
-    return verify_agent_token(token, opts)
-
-
-def verify_agent_request_with_owner(req: _HeadersLike, opts: VerifyOwnerOptions) -> VerifyResult:
-    token, err = _extract_token(req)
-    if err is not None:
-        return err
-    assert token is not None
-    return verify_agent_token_with_owner(token, opts)

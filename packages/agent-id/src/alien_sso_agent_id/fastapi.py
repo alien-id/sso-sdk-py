@@ -1,4 +1,4 @@
-"""FastAPI dependencies for AgentID auth.
+"""FastAPI dependency for RFC 9449 DPoP authentication.
 
 Optional — only import this if you've installed the `fastapi` extra:
 
@@ -6,130 +6,99 @@ Optional — only import this if you've installed the `fastapi` extra:
 
 Example:
 
-    from fastapi import Depends, FastAPI
-    from alien_sso_agent_id import AgentIdentity, fetch_alien_jwks
-    from alien_sso_agent_id.fastapi import build_require_agent
+    from fastapi import Depends, FastAPI, Request
+    from alien_sso_agent_id import fetch_alien_jwks, VerifyDPoPSuccess
+    from alien_sso_agent_id.fastapi import build_require_dpop
 
     app = FastAPI()
     JWKS = fetch_alien_jwks()
-    require_agent = build_require_agent(jwks=JWKS, owner_required=True)
+    require_dpop = build_require_dpop(
+        jwks=JWKS,
+        expected_audience="my-resource-server",
+    )
 
     @app.get("/me")
-    def me(ident: AgentIdentity = Depends(require_agent)):
-        return {"fingerprint": ident.fingerprint, "owner": ident.owner}
+    def me(auth: VerifyDPoPSuccess = Depends(require_dpop)):
+        return {"sub": auth.sub, "jkt": auth.jkt}
 """
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 
 try:
-    from fastapi import Header, HTTPException
+    from fastapi import HTTPException, Request
 except ImportError as e:  # pragma: no cover
     raise ImportError(
         "FastAPI is not installed. Install with: pip install 'alien-sso-agent-id[fastapi]'"
     ) from e
 
 from alien_sso_agent_id.types import (
-    AgentIdentity,
     JWKS,
-    VerifyFailure,
-    VerifyOwnerOptions,
-    VerifyOwnerSuccess,
-    VerifyOptions,
-    VerifySuccess,
+    DPoPJtiStore,
+    VerifyDPoPFailure,
+    VerifyDPoPOptions,
+    VerifyDPoPSuccess,
 )
-from alien_sso_agent_id.verify import (
-    verify_agent_token,
-    verify_agent_token_with_owner,
-)
+from alien_sso_agent_id.verify import verify_dpop_request
 
 
-def build_require_agent(
+def build_require_dpop(
     *,
-    jwks: Optional[JWKS] = None,
-    owner_required: bool = False,
-    max_age_ms: int = 5 * 60 * 1000,
-    clock_skew_ms: int = 30 * 1000,
+    jwks: JWKS,
     expected_issuer: Optional[str] = None,
-    expected_audience: Optional[Union[str, list[str]]] = None,
-) -> Callable[..., AgentIdentity]:
-    """Build a FastAPI dependency that verifies the AgentID token on each request.
+    expected_audience: Optional[str] = None,
+    proof_max_age_sec: int = 30,
+    clock_skew_sec: int = 30,
+    jti_store: Optional[DPoPJtiStore] = None,
+) -> Callable[[Request], VerifyDPoPSuccess]:
+    """Build a FastAPI dependency that verifies RFC 9449 DPoP on each request.
 
-    If `jwks` is given, full owner-chain verification runs and `expected_issuer`
-    + `expected_audience` are REQUIRED (RFC 7519 §4.1.1 / §4.1.3). If
-    `owner_required` is True, requests from agents without a verified human
-    owner are rejected with 403.
+    On verification failure, raises 401 with an RFC 6750 §3.1-style
+    `WWW-Authenticate: DPoP error="invalid_token"` challenge.
     """
-    if jwks is not None and (expected_issuer is None or expected_audience is None):
-        raise ValueError(
-            "build_require_agent: when jwks is provided, expected_issuer and "
-            "expected_audience are required (RFC 7519 §4.1.1 / §4.1.3)"
+
+    def _require_dpop(request: Request) -> VerifyDPoPSuccess:
+        # Convert Starlette's MultiDict-ish Headers into a plain dict with
+        # case-insensitive single-value-or-list semantics that
+        # verify_dpop_request expects.
+        headers: dict[str, object] = {}
+        for k, v in request.headers.items():
+            existing = headers.get(k.lower())
+            if existing is None:
+                headers[k.lower()] = v
+            elif isinstance(existing, list):
+                existing.append(v)
+            else:
+                headers[k.lower()] = [existing, v]
+        req = {
+            "method": request.method,
+            "url": str(request.url),
+            "headers": headers,
+        }
+        result = verify_dpop_request(
+            req,
+            VerifyDPoPOptions(
+                jwks=jwks,
+                expected_issuer=expected_issuer,
+                expected_audience=expected_audience,
+                proof_max_age_sec=proof_max_age_sec,
+                clock_skew_sec=clock_skew_sec,
+                jti_store=jti_store,
+            ),
         )
-
-    def _require_agent(authorization: Optional[str] = Header(default=None)) -> AgentIdentity:
-        if not authorization or not authorization.startswith("AgentID "):
-            raise HTTPException(
-                status_code=401,
-                detail="missing Authorization: AgentID <token> header",
-                headers={"WWW-Authenticate": "AgentID"},
-            )
-        token = authorization[len("AgentID "):].strip()
-
-        if jwks is not None:
-            assert expected_issuer is not None and expected_audience is not None
-            result = verify_agent_token_with_owner(
-                token,
-                VerifyOwnerOptions(
-                    jwks=jwks,
-                    expected_issuer=expected_issuer,
-                    expected_audience=expected_audience,
-                    max_age_ms=max_age_ms,
-                    clock_skew_ms=clock_skew_ms,
-                ),
-            )
-        else:
-            result = verify_agent_token(
-                token,
-                VerifyOptions(max_age_ms=max_age_ms, clock_skew_ms=clock_skew_ms),
-            )
-
-        if isinstance(result, VerifyFailure):
+        if isinstance(result, VerifyDPoPFailure):
             # RFC 6750 §3 / §3.1: a 401 for invalid credentials MUST carry
             # a WWW-Authenticate challenge identifying the auth-scheme and
-            # SHOULD include `error="invalid_token"`. The missing-token
-            # branch above emits the bare scheme; this is the bad-credentials
-            # arm.
+            # SHOULD include `error="invalid_token"`. RFC 9449 §7.1 keeps
+            # the DPoP scheme on the challenge.
             raise HTTPException(
                 status_code=401,
                 detail=result.error,
-                headers={"WWW-Authenticate": 'AgentID error="invalid_token"'},
+                headers={
+                    "WWW-Authenticate": f'DPoP error="invalid_token", error_description="{result.code}"'
+                },
             )
+        return result
 
-        if isinstance(result, VerifyOwnerSuccess):
-            ident = AgentIdentity(
-                fingerprint=result.fingerprint,
-                owner=result.owner,
-                public_key_pem=result.public_key_pem,
-                owner_verified=True,
-            )
-        else:
-            assert isinstance(result, VerifySuccess)
-            ident = AgentIdentity(
-                fingerprint=result.fingerprint,
-                owner=result.owner,
-                public_key_pem=result.public_key_pem,
-                owner_verified=result.owner_verified,
-            )
-
-        if owner_required and not ident.owner:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "agent must be owner-bound (verify your Alien Agent ID with a human owner)"
-                ),
-                headers={"WWW-Authenticate": "AgentID"},
-            )
-        return ident
-
-    return _require_agent
+    return _require_dpop
